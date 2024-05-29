@@ -14,7 +14,6 @@
 
 #include <neural-graphics-primitives/common_device.cuh>
 #include <neural-graphics-primitives/common.h>
-#include <neural-graphics-primitives/discrete_distribution.h>
 #include <neural-graphics-primitives/envmap.cuh>
 #include <neural-graphics-primitives/random_val.cuh> // helpers to generate random values, directions
 #include <neural-graphics-primitives/render_buffer.h>
@@ -893,7 +892,10 @@ void Testbed::render_sdf(
 		plane_z = -plane_z;
 	}
 	auto* octree_ptr = m_sdf.uses_takikawa_encoding || m_sdf.use_triangle_octree ? m_sdf.triangle_octree.get() : nullptr;
-
+	// if(octree_ptr)
+	// 	tlog::info() << "Using triangle octree with " ;
+	// else
+	// 	tlog::info() << "Not using triangle octree";
 	SphereTracer tracer;
 
 	uint32_t n_octree_levels = octree_ptr ? octree_ptr->depth() : 0;
@@ -902,6 +904,12 @@ void Testbed::render_sdf(
 	}
 
 	BoundingBox sdf_bounding_box = m_aabb;
+
+	// tlog::info() << "setting bounding box" ;
+	// tlog::info() << "sdf_bounding_box.min: (" << sdf_bounding_box.min.x << ", " << sdf_bounding_box.min.y << ", " << sdf_bounding_box.min.z << ")";
+	// tlog::info() << "sdf_bounding_box.max: (" << sdf_bounding_box.max.x << ", " << sdf_bounding_box.max.y << ", " << sdf_bounding_box.max.z << ")";
+	
+
 	sdf_bounding_box.inflate(m_sdf.zero_offset);
 	tracer.init_rays_from_camera(
 		render_buffer.spp,
@@ -930,6 +938,7 @@ void Testbed::render_sdf(
 
 	auto trace = [&](SphereTracer& tracer) {
 		if (gt_raytrace) {
+			// tlog::info() << "Using ground truth raytracing";
 			return tracer.trace_bvh(m_sdf.triangle_bvh.get(), m_sdf.triangles_gpu.data(), stream);
 		} else {
 			return tracer.trace(

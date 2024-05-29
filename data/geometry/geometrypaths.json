@@ -1,0 +1,21 @@
+{
+    "geometry": [
+        {
+            "center": [0.0, 0.0, 0.0],
+            "path": "/home/fsalehi/instant-ngp-rendering/data/geometry/objs/bunny.obj",
+            "type": "Mesh"
+        },
+        {
+            "center": [1.0, 1.0, 1.0],
+            "path": "/home/fsalehi/instant-ngp-rendering/data/geometry/objs/bunny.obj",
+            "type": "Mesh"
+        },
+        {
+            "center": [-1.0, 1.0, 1.0],
+            "path": "/home/fsalehi/instant-ngp-rendering/data/geometry/objs/bunny.obj",
+            "type": "Mesh"
+        }
+       
+    
+    ]
+}

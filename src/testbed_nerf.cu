@@ -1787,7 +1787,7 @@ void Testbed::NerfTracer::enlarge(size_t n_elements, uint32_t padded_output_widt
 	m_alive_counter = std::get<12>(scratch);
 }
 
-std::vector<float> Testbed::Nerf::Training::get_extra_dims_cpu(int trainview) const {
+std::vector<float> Nerf::Training::get_extra_dims_cpu(int trainview) const {
 	if (dataset.n_extra_dims() == 0) {
 		return {};
 	}
@@ -1804,7 +1804,7 @@ std::vector<float> Testbed::Nerf::Training::get_extra_dims_cpu(int trainview) co
 	return extra_dims_cpu;
 }
 
-void Testbed::Nerf::Training::update_extra_dims() {
+void Nerf::Training::update_extra_dims() {
 	uint32_t n_extra_dims = dataset.n_extra_dims();
 	std::vector<float> extra_dims_cpu(extra_dims_gpu.size());
 	for (uint32_t i = 0; i < extra_dims_opt.size(); ++i) {
@@ -1979,7 +1979,7 @@ void Testbed::render_nerf(
 	}
 }
 
-void Testbed::Nerf::Training::set_camera_intrinsics(int frame_idx, float fx, float fy, float cx, float cy, float k1, float k2, float p1, float p2, float k3, float k4, bool is_fisheye) {
+void Nerf::Training::set_camera_intrinsics(int frame_idx, float fx, float fy, float cx, float cy, float k1, float k2, float p1, float p2, float k3, float k4, bool is_fisheye) {
 	if (frame_idx < 0 || frame_idx >= dataset.n_images) {
 		return;
 	}
@@ -2002,7 +2002,7 @@ void Testbed::Nerf::Training::set_camera_intrinsics(int frame_idx, float fx, flo
 	dataset.update_metadata(frame_idx, frame_idx + 1);
 }
 
-void Testbed::Nerf::Training::set_camera_extrinsics_rolling_shutter(int frame_idx, mat4x3 camera_to_world_start, mat4x3 camera_to_world_end, const vec4& rolling_shutter, bool convert_to_ngp) {
+void Nerf::Training::set_camera_extrinsics_rolling_shutter(int frame_idx, mat4x3 camera_to_world_start, mat4x3 camera_to_world_end, const vec4& rolling_shutter, bool convert_to_ngp) {
 	if (frame_idx < 0 || frame_idx >= dataset.n_images) {
 		return;
 	}
@@ -2023,11 +2023,11 @@ void Testbed::Nerf::Training::set_camera_extrinsics_rolling_shutter(int frame_id
 	update_transforms(frame_idx, frame_idx + 1);
 }
 
-void Testbed::Nerf::Training::set_camera_extrinsics(int frame_idx, mat4x3 camera_to_world, bool convert_to_ngp) {
+void Nerf::Training::set_camera_extrinsics(int frame_idx, mat4x3 camera_to_world, bool convert_to_ngp) {
 	set_camera_extrinsics_rolling_shutter(frame_idx, camera_to_world, camera_to_world, vec4(0.0f), convert_to_ngp);
 }
 
-void Testbed::Nerf::Training::reset_camera_extrinsics() {
+void Nerf::Training::reset_camera_extrinsics() {
 	for (auto&& opt : cam_rot_offset) {
 		opt.reset_state();
 	}
@@ -2041,7 +2041,7 @@ void Testbed::Nerf::Training::reset_camera_extrinsics() {
 	}
 }
 
-void Testbed::Nerf::Training::export_camera_extrinsics(const fs::path& path, bool export_extrinsics_in_quat_format) {
+void Nerf::Training::export_camera_extrinsics(const fs::path& path, bool export_extrinsics_in_quat_format) {
 	tlog::info() << "Saving a total of " << n_images_for_training << " poses to " << path.str();
 	nlohmann::json trajectory;
 	for(int i = 0; i < n_images_for_training; ++i) {
@@ -2079,14 +2079,14 @@ void Testbed::Nerf::Training::export_camera_extrinsics(const fs::path& path, boo
 	file << std::setw(2) << trajectory << std::endl;
 }
 
-mat4x3 Testbed::Nerf::Training::get_camera_extrinsics(int frame_idx) {
+mat4x3 Nerf::Training::get_camera_extrinsics(int frame_idx) {
 	if (frame_idx < 0 || frame_idx >= dataset.n_images) {
 		return mat4x3::identity();
 	}
 	return dataset.ngp_matrix_to_nerf(transforms[frame_idx].start);
 }
 
-void Testbed::Nerf::Training::update_transforms(int first, int last) {
+void Nerf::Training::update_transforms(int first, int last) {
 	if (last < 0) {
 		last = dataset.n_images;
 	}
@@ -2403,7 +2403,7 @@ void Testbed::mark_density_grid_in_sphere_empty(const vec3& pos, float radius, c
 	update_density_grid_mean_and_bitfield(stream);
 }
 
-void Testbed::NerfCounters::prepare_for_training_steps(cudaStream_t stream) {
+void NerfCounters::prepare_for_training_steps(cudaStream_t stream) {
 	numsteps_counter.enlarge(1);
 	numsteps_counter_compacted.enlarge(1);
 	loss.enlarge(rays_per_batch);
@@ -2412,7 +2412,7 @@ void Testbed::NerfCounters::prepare_for_training_steps(cudaStream_t stream) {
 	CUDA_CHECK_THROW(cudaMemsetAsync(loss.data(), 0, sizeof(float)*rays_per_batch, stream));
 }
 
-float Testbed::NerfCounters::update_after_training(uint32_t target_batch_size, bool get_loss_scalar, cudaStream_t stream) {
+float NerfCounters::update_after_training(uint32_t target_batch_size, bool get_loss_scalar, cudaStream_t stream) {
 	std::vector<uint32_t> counter_cpu(1);
 	std::vector<uint32_t> compacted_counter_cpu(1);
 	numsteps_counter.copy_to_host(counter_cpu);
@@ -2672,7 +2672,7 @@ void Testbed::train_nerf(uint32_t target_batch_size, bool get_loss_scalar, cudaS
 	}
 }
 
-void Testbed::train_nerf_step(uint32_t target_batch_size, Testbed::NerfCounters& counters, cudaStream_t stream) {
+void Testbed::train_nerf_step(uint32_t target_batch_size, NerfCounters& counters, cudaStream_t stream) {
 	const uint32_t padded_output_width = m_network->padded_output_width();
 	const uint32_t max_samples = target_batch_size * 16; // Somewhat of a worst case
 	const uint32_t floats_per_coord = sizeof(NerfCoordinate) / sizeof(float) + m_nerf_network->n_extra_dims();
@@ -3166,11 +3166,11 @@ int Testbed::marching_cubes(ivec3 res3d, const BoundingBox& aabb, const mat3& re
 	return (int)(m_mesh.indices.size()/3);
 }
 
-uint8_t* Testbed::Nerf::get_density_grid_bitfield_mip(uint32_t mip) {
+uint8_t* Nerf::get_density_grid_bitfield_mip(uint32_t mip) {
 	return density_grid_bitfield.data() + grid_mip_offset(mip)/8;
 }
 
-void Testbed::Nerf::reset_extra_dims(default_rng_t& rng) {
+void Nerf::reset_extra_dims(default_rng_t& rng) {
 	uint32_t n_extra_dims = training.dataset.n_extra_dims();
 	std::vector<float> extra_dims_cpu(n_extra_dims * (training.dataset.n_images + 1)); // n_images + 1 since we use an extra 'slot' for the inference latent code
 	float* dst = extra_dims_cpu.data();
@@ -3195,7 +3195,7 @@ void Testbed::Nerf::reset_extra_dims(default_rng_t& rng) {
 	CUDA_CHECK_THROW(cudaMemcpy(rendering_extra_dims.data(), training.extra_dims_gpu.data(), rendering_extra_dims.bytes(), cudaMemcpyDeviceToDevice));
 }
 
-const float* Testbed::Nerf::get_rendering_extra_dims(cudaStream_t stream) const {
+const float* Nerf::get_rendering_extra_dims(cudaStream_t stream) const {
 	CHECK_THROW(rendering_extra_dims.size() == training.dataset.n_extra_dims());
 
 	if (training.dataset.n_extra_dims() == 0) {
@@ -3220,7 +3220,7 @@ const float* Testbed::Nerf::get_rendering_extra_dims(cudaStream_t stream) const 
 	return dims_gpu;
 }
 
-int Testbed::Nerf::find_closest_training_view(mat4x3 pose) const {
+int Nerf::find_closest_training_view(mat4x3 pose) const {
 	int bestimage = training.view;
 	float bestscore = std::numeric_limits<float>::infinity();
 	for (int i = 0; i < training.n_images_for_training; ++i) {
@@ -3235,7 +3235,7 @@ int Testbed::Nerf::find_closest_training_view(mat4x3 pose) const {
 	return bestimage;
 }
 
-void Testbed::Nerf::set_rendering_extra_dims_from_training_view(int trainview) {
+void Nerf::set_rendering_extra_dims_from_training_view(int trainview) {
 	if (!training.dataset.n_extra_dims()) {
 		throw std::runtime_error{"Dataset does not have extra dims."};
 	}
@@ -3247,7 +3247,7 @@ void Testbed::Nerf::set_rendering_extra_dims_from_training_view(int trainview) {
 	rendering_extra_dims_from_training_view = trainview;
 }
 
-void Testbed::Nerf::set_rendering_extra_dims(const std::vector<float>& vals) {
+void Nerf::set_rendering_extra_dims(const std::vector<float>& vals) {
 	CHECK_THROW(rendering_extra_dims.size() == training.dataset.n_extra_dims());
 
 	if (vals.size() != training.dataset.n_extra_dims()) {
@@ -3258,7 +3258,7 @@ void Testbed::Nerf::set_rendering_extra_dims(const std::vector<float>& vals) {
 	rendering_extra_dims.copy_from_host(vals);
 }
 
-std::vector<float> Testbed::Nerf::get_rendering_extra_dims_cpu() const {
+std::vector<float> Nerf::get_rendering_extra_dims_cpu() const {
 	CHECK_THROW(rendering_extra_dims.size() == training.dataset.n_extra_dims());
 
 	if (training.dataset.n_extra_dims() == 0) {

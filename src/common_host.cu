@@ -150,6 +150,10 @@ ETestbedMode mode_from_scene(const std::string& scene) {
 	}
 
 	if (scene_path.is_directory() || equals_case_insensitive(scene_path.extension(), "json")) {
+		if(scene_path.filename().find("geometry") != std::string::npos){
+			tlog::info() << "setting the mode geometry";
+			return ETestbedMode::Geometry;
+		}
 		return ETestbedMode::Nerf;
 	} else if (equals_case_insensitive(scene_path.extension(), "obj") || equals_case_insensitive(scene_path.extension(), "stl")) {
 		return ETestbedMode::Sdf;
@@ -169,6 +173,8 @@ ETestbedMode mode_from_string(const std::string& str) {
 		return ETestbedMode::Image;
 	} else if (equals_case_insensitive(str, "volume")) {
 		return ETestbedMode::Volume;
+	} else if (equals_case_insensitive(str, "geometry")) {
+		return ETestbedMode::Geometry;
 	} else {
 		return ETestbedMode::None;
 	}
@@ -180,6 +186,7 @@ std::string to_string(ETestbedMode mode) {
 		case ETestbedMode::Sdf: return "sdf";
 		case ETestbedMode::Image: return "image";
 		case ETestbedMode::Volume: return "volume";
+		case ETestbedMode::Geometry: return "geometry";
 		case ETestbedMode::None: return "none";
 		default: throw std::runtime_error{fmt::format("Can not convert mode {} to string.", (int)mode)};
 	}

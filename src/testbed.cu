@@ -142,9 +142,10 @@ void Testbed::load_training_data(const fs::path& path) {
 		case ETestbedMode::Sdf:    load_mesh(path); break;
 		case ETestbedMode::Image:  load_image(path); break;
 		case ETestbedMode::Volume: load_volume(path); break;
+		case ETestbedMode::Geometry: load_scene(path); break;
 		default: throw std::runtime_error{"Invalid testbed mode."};
 	}
-
+	
 	m_training_data_available = true;
 
 	update_imgui_paths();
@@ -172,7 +173,8 @@ void Testbed::set_mode(ETestbedMode mode) {
 	m_nerf = {};
 	m_sdf = {};
 	m_volume = {};
-
+	m_geometry = {};
+	
 	// Kill training-related things
 	m_encoding = {};
 	m_loss = {};
@@ -234,6 +236,7 @@ fs::path Testbed::find_network_config(const fs::path& network_config_path) {
 }
 
 json Testbed::load_network_config(std::istream& stream, bool is_compressed) {
+	tlog::info() << "Loading network config from stream. 239";
 	if (is_compressed) {
 		zstr::istream zstream{stream};
 		return json::from_msgpack(zstream);
@@ -242,6 +245,7 @@ json Testbed::load_network_config(std::istream& stream, bool is_compressed) {
 }
 
 json Testbed::load_network_config(const fs::path& network_config_path) {
+	tlog::info() << "Loading network config from: " << network_config_path;
 	bool is_snapshot = equals_case_insensitive(network_config_path.extension(), "msgpack") || equals_case_insensitive(network_config_path.extension(), "ingp");
 	if (network_config_path.empty() || !network_config_path.exists()) {
 		throw std::runtime_error{fmt::format("Network {} '{}' does not exist.", is_snapshot ? "snapshot" : "config", network_config_path.str())};
@@ -270,6 +274,7 @@ json Testbed::load_network_config(const fs::path& network_config_path) {
 }
 
 void Testbed::reload_network_from_file(const fs::path& path) {
+	tlog::info() << "Reloading network from file: " << path;
 	if (!path.empty()) {
 		fs::path candidate = find_network_config(path);
 		if (candidate.exists() || !m_network_config_path.exists()) {
@@ -313,7 +318,9 @@ void Testbed::reload_network_from_json(const json& json, const std::string& conf
 void Testbed::load_file(const fs::path& path) {
 	if (!path.exists()) {
 		// If the path doesn't exist, but a network config can be resolved, load that.
+		tlog::info() << "Path does not exist.";
 		if (equals_case_insensitive(path.extension(), "json") && find_network_config(path).exists()) {
+			tlog::info() << "Loading network config.";
 			reload_network_from_file(path);
 			return;
 		}
@@ -323,12 +330,14 @@ void Testbed::load_file(const fs::path& path) {
 	}
 
 	if (equals_case_insensitive(path.extension(), "ingp") || equals_case_insensitive(path.extension(), "msgpack")) {
+		tlog::info() << "Loading snapshot.";
 		load_snapshot(path);
 		return;
 	}
 
 	// If we get a json file, we need to parse it to determine its purpose.
 	if (equals_case_insensitive(path.extension(), "json")) {
+		tlog::info() << "Parsing JSON file.";
 		json file;
 		{
 			std::ifstream f{native_string(path)};
@@ -337,25 +346,38 @@ void Testbed::load_file(const fs::path& path) {
 
 		// Snapshot in json format... inefficient, but technically supported.
 		if (file.contains("snapshot")) {
+			tlog::info() << "Loading snapshot from JSON.";
 			load_snapshot(path);
 			return;
 		}
 
 		// Regular network config
 		if (file.contains("parent") || file.contains("network") || file.contains("encoding") || file.contains("loss") || file.contains("optimizer")) {
+			tlog::info() << "Reloading network from file.";
 			reload_network_from_file(path);
 			return;
 		}
 
 		// Camera path
 		if (file.contains("path")) {
+			tlog::info() << "Loading camera path.";
 			load_camera_path(path);
 			return;
 		}
+
+		// Geometry file
+    	// if (file.contains("geometry")) {
+		// 	m_train = false;
+		// 	set_mode(ETestbedMode::Geometry);
+		// 	tlog::info() << "Loading geometry from: " << path;
+    	//     load_scene(path);
+    	//     return;
+    	// }
 	}
 
 	// If the dragged file isn't any of the above, assume that it's training data
 	try {
+		tlog::info() << "Loading training data.";
 		bool was_training_data_available = m_training_data_available;
 		load_training_data(path);
 
@@ -363,6 +385,7 @@ void Testbed::load_file(const fs::path& path) {
 			// If we previously didn't have any training data and only now dragged
 			// some into the window, it is very unlikely that the user doesn't
 			// want to immediately start training on that data. So: go for it.
+			tlog::info() << "Starting training.";
 			m_train = true;
 		}
 	} catch (const std::runtime_error& e) {
@@ -534,7 +557,11 @@ ivec3 Testbed::compute_and_save_png_slices(const fs::path& filename, int res, Bo
 	}
 
 	std::string fname = fmt::format(".density_slices_{}x{}x{}.png", res3d.x, res3d.y, res3d.z);
-	GPUMemory<float> density = (m_render_ground_truth && m_testbed_mode == ETestbedMode::Sdf) ? get_sdf_gt_on_grid(res3d, aabb, render_aabb_to_local) : get_density_on_grid(res3d, aabb, render_aabb_to_local);
+	GPUMemory<float> density = (m_render_ground_truth && m_testbed_mode == ETestbedMode::Sdf) ? get_sdf_gt_on_grid(res3d, aabb, render_aabb_to_local)
+	// : ((m_render_ground_truth && m_testbed_mode == ETestbedMode::Geometry) 
+    //     ? get_sdf_gt_on_grid_geometry(res3d, aabb, render_aabb_to_local) 
+        : get_density_on_grid(res3d, aabb, render_aabb_to_local);
+		
 	save_density_grid_to_png(density, filename.str() + fname, res3d, thresh, flip_y_and_z_axes, range);
 	return res3d;
 }
@@ -2720,6 +2747,7 @@ void Testbed::prepare_next_camera_path_frame() {
 
 void Testbed::train_and_render(bool skip_rendering) {
 	if (m_train) {
+		// tlog::info() << "Training neural network...";
 		train(m_training_batch_size);
 	}
 
@@ -2741,7 +2769,15 @@ void Testbed::train_and_render(bool skip_rendering) {
 	float frame_ms = m_camera_path.rendering ? 0.0f : m_frame_ms.val();
 	apply_camera_smoothing(frame_ms);
 
+	// if(Testbed::m_testbed_mode == ETestbedMode::Geometry) {
+	// 	m_render_window = true;
+	// 	m_render = true;
+	// 	skip_rendering = false;
+	// 	m_single_view = true;
+	// }
+
 	if (!m_render_window || !m_render || skip_rendering) {
+		// tlog::info() << "we are skipping rendering!" ;
 		return;
 	}
 
@@ -2879,11 +2915,11 @@ void Testbed::train_and_render(bool skip_rendering) {
 				render_res = view.render_buffer->dlss()->clamp_resolution(render_res);
 				view.render_buffer->dlss()->update_feature(render_res, view.render_buffer->dlss()->is_hdr(), view.render_buffer->dlss()->sharpen());
 			}
-
 			view.render_buffer->resize(render_res);
 
 			if (m_foveated_rendering) {
 				if (m_dynamic_foveated_rendering) {
+            
 					vec2 resolution_scale = vec2(render_res) / vec2(view.full_resolution);
 
 					// Only start foveation when DLSS if off or if DLSS is asked to do more than 1.5x upscaling.
@@ -3391,6 +3427,10 @@ bool Testbed::frame() {
 		m_sdf.iou = calculate_iou(m_train ? 64*64*64 : 128*128*128, m_sdf.iou_decay, false, true);
 		m_sdf.iou_decay = 0.f;
 	}
+	else if (m_testbed_mode == ETestbedMode::Geometry && m_geometry.mesh_cpu[0].sdf.calculate_iou_online) {
+		m_geometry.mesh_cpu[0].sdf.iou = calculate_iou(m_train ? 64*64*64 : 128*128*128, m_geometry.mesh_cpu[0].sdf.iou_decay, false, true);
+		m_geometry.mesh_cpu[0].sdf.iou_decay = 0.f;
+	}
 
 #ifdef NGP_GUI
 	if (m_render_window) {
@@ -3576,12 +3616,14 @@ Testbed::NetworkDims Testbed::network_dims() const {
 		case ETestbedMode::Sdf:    return network_dims_sdf(); break;
 		case ETestbedMode::Image:  return network_dims_image(); break;
 		case ETestbedMode::Volume: return network_dims_volume(); break;
+		case ETestbedMode::Geometry: return network_dims_geometry(); break;
 		default: throw std::runtime_error{"Invalid mode."};
 	}
 }
 
 void Testbed::reset_network(bool clear_density_grid) {
 	m_sdf.iou_decay = 0;
+	m_geometry.mesh_cpu[0].sdf.iou_decay = 0;
 
 	m_rng = default_rng_t{m_seed};
 
@@ -3611,7 +3653,7 @@ void Testbed::reset_network(bool clear_density_grid) {
 
 	// Default config
 	json config = m_network_config;
-
+	
 	json& encoding_config = config["encoding"];
 	json& loss_config = config["loss"];
 	json& optimizer_config = config["optimizer"];
@@ -3749,53 +3791,110 @@ void Testbed::reset_network(bool clear_density_grid) {
 			m_distortion.optimizer.reset(create_optimizer<float>(distortion_map_optimizer_config));
 			m_distortion.trainer = std::make_shared<Trainer<float, float>>(m_distortion.map, m_distortion.optimizer, std::shared_ptr<Loss<float>>{create_loss<float>(loss_config)}, m_seed);
 		}
-	} else {
-		uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
+	} 
+	
+	else {
 
-		if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
-			if (m_sdf.octree_depth_target == 0) {
-				m_sdf.octree_depth_target = encoding_config["n_levels"];
+		if(m_testbed_mode == ETestbedMode::Geometry)	{
+			
+			uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
+
+			if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
+				if (m_geometry.mesh_cpu[0].sdf.octree_depth_target == 0) {
+					m_geometry.mesh_cpu[0].sdf.octree_depth_target = encoding_config["n_levels"];
+				}
+
+				if (!m_geometry.mesh_cpu[0].sdf.triangle_octree || m_geometry.mesh_cpu[0].sdf.triangle_octree->depth() != m_geometry.mesh_cpu[0].sdf.octree_depth_target) {
+					m_geometry.mesh_cpu[0].sdf.triangle_octree.reset(new TriangleOctree{});
+					m_geometry.mesh_cpu[0].sdf.triangle_octree->build(*m_geometry.mesh_cpu[0].sdf.triangle_bvh, m_geometry.mesh_cpu[0].sdf.triangles_cpu, m_geometry.mesh_cpu[0].sdf.octree_depth_target);
+					m_geometry.mesh_cpu[0].sdf.octree_depth_target = m_geometry.mesh_cpu[0].sdf.triangle_octree->depth();
+					m_geometry.mesh_cpu[0].sdf.brick_data.free_memory();
+				}
+
+				m_encoding.reset(new TakikawaEncoding<network_precision_t>(
+					encoding_config["starting_level"],
+					m_geometry.mesh_cpu[0].sdf.triangle_octree,
+					string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
+				));
+
+				m_geometry.mesh_cpu[0].sdf.uses_takikawa_encoding = true;
+			} else {
+				m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
+
+				m_geometry.mesh_cpu[0].sdf.uses_takikawa_encoding = false;
+				if (m_geometry.mesh_cpu[0].sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
+					m_geometry.mesh_cpu[0].sdf.octree_depth_target = encoding_config["n_levels"];
+				}
 			}
 
-			if (!m_sdf.triangle_octree || m_sdf.triangle_octree->depth() != m_sdf.octree_depth_target) {
-				m_sdf.triangle_octree.reset(new TriangleOctree{});
-				m_sdf.triangle_octree->build(*m_sdf.triangle_bvh, m_sdf.triangles_cpu, m_sdf.octree_depth_target);
-				m_sdf.octree_depth_target = m_sdf.triangle_octree->depth();
-				m_sdf.brick_data.free_memory();
+			for (auto& device : m_devices) {
+				device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
 			}
 
-			m_encoding.reset(new TakikawaEncoding<network_precision_t>(
-				encoding_config["starting_level"],
-				m_sdf.triangle_octree,
-				string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
-			));
+			m_network = primary_device().network();
 
-			m_sdf.uses_takikawa_encoding = true;
-		} else {
-			m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
+			n_encoding_params = m_encoding->n_params();
 
-			m_sdf.uses_takikawa_encoding = false;
-			if (m_sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
-				m_sdf.octree_depth_target = encoding_config["n_levels"];
-			}
+			tlog::info()
+				<< "Model:         " << dims.n_input
+				<< "--[" << std::string(encoding_config["otype"])
+				<< "]-->" << m_encoding->padded_output_width()
+				<< "--[" << std::string(network_config["otype"])
+				<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+				<< "]-->" << dims.n_output
+				;
+
 		}
+		
+		else {
 
-		for (auto& device : m_devices) {
-			device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
+			uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
+
+			if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
+				if (m_sdf.octree_depth_target == 0) {
+					m_sdf.octree_depth_target = encoding_config["n_levels"];
+				}
+
+				if (!m_sdf.triangle_octree || m_sdf.triangle_octree->depth() != m_sdf.octree_depth_target) {
+					m_sdf.triangle_octree.reset(new TriangleOctree{});
+					m_sdf.triangle_octree->build(*m_sdf.triangle_bvh, m_sdf.triangles_cpu, m_sdf.octree_depth_target);
+					m_sdf.octree_depth_target = m_sdf.triangle_octree->depth();
+					m_sdf.brick_data.free_memory();
+				}
+
+				m_encoding.reset(new TakikawaEncoding<network_precision_t>(
+					encoding_config["starting_level"],
+					m_sdf.triangle_octree,
+					string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
+				));
+
+				m_sdf.uses_takikawa_encoding = true;
+			} else {
+				m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
+
+				m_sdf.uses_takikawa_encoding = false;
+				if (m_sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
+					m_sdf.octree_depth_target = encoding_config["n_levels"];
+				}
+			}
+
+			for (auto& device : m_devices) {
+				device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
+			}
+
+			m_network = primary_device().network();
+
+			n_encoding_params = m_encoding->n_params();
+
+			tlog::info()
+				<< "Model:         " << dims.n_input
+				<< "--[" << std::string(encoding_config["otype"])
+				<< "]-->" << m_encoding->padded_output_width()
+				<< "--[" << std::string(network_config["otype"])
+				<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+				<< "]-->" << dims.n_output
+				;
 		}
-
-		m_network = primary_device().network();
-
-		n_encoding_params = m_encoding->n_params();
-
-		tlog::info()
-			<< "Model:         " << dims.n_input
-			<< "--[" << std::string(encoding_config["otype"])
-			<< "]-->" << m_encoding->padded_output_width()
-			<< "--[" << std::string(network_config["otype"])
-			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
-			<< "]-->" << dims.n_output
-			;
 	}
 
 	size_t n_network_params = m_network->n_params() - n_encoding_params;
@@ -3978,6 +4077,7 @@ bool Testbed::clear_tmp_dir() {
 
 void Testbed::train(uint32_t batch_size) {
 	if (!m_training_data_available || m_camera_path.rendering) {
+		tlog::info() << "No training data available.";
 		m_train = false;
 		return;
 	}
@@ -4023,6 +4123,7 @@ void Testbed::train(uint32_t batch_size) {
 			case ETestbedMode::Sdf: training_prep_sdf(batch_size, m_stream.get()); break;
 			case ETestbedMode::Image: training_prep_image(batch_size, m_stream.get()); break;
 			case ETestbedMode::Volume: training_prep_volume(batch_size, m_stream.get()); break;
+			case ETestbedMode::Geometry: training_prep_geometry(batch_size, m_stream.get()); break;
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
 
@@ -4051,6 +4152,7 @@ void Testbed::train(uint32_t batch_size) {
 			case ETestbedMode::Sdf: train_sdf(batch_size, get_loss_scalar, m_stream.get()); break;
 			case ETestbedMode::Image: train_image(batch_size, get_loss_scalar, m_stream.get()); break;
 			case ETestbedMode::Volume: train_volume(batch_size, get_loss_scalar, m_stream.get()); break;
+			case ETestbedMode::Geometry: train_sdf_geometry(batch_size, get_loss_scalar, m_stream.get()); break;
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
 
@@ -4323,7 +4425,8 @@ void Testbed::render_frame_main(
 ) {
 	device.render_buffer_view().clear(device.stream());
 
-	if (!m_network) {
+	if (!m_network ) {
+		tlog::info() << "No network available.";
 		return;
 	}
 
@@ -4419,6 +4522,88 @@ void Testbed::render_frame_main(
 			break;
 		case ETestbedMode::Volume:
 			render_volume(device.stream(), device.render_buffer_view(), focal_length, camera_matrix0, screen_center, foveation);
+			break;
+			case ETestbedMode::Geometry:
+			{
+
+				// distance_fun_t distance_fun = [&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
+    			// 	m_geometry.geometry_mesh_bvh->signed_distance_gpu_mesh(
+    			// 	    n_elements,
+    			// 	    m_sdf.mesh_sdf_mode,
+    			// 	    positions,
+    			// 	    distances,
+    			// 	    m_geometry.mesh_cpu.data(),
+    			// 	    false,
+    			// 	    stream
+    			// 	);
+				// };
+				
+				// Todo: this should not be empty!
+				// normals_fun_t normals_fun = [](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
+    			// 	// NO-OP. Normals will automatically be populated by raytrace
+				// };
+				// // tlog::info() << "about ot render geometry mesh";
+				// render_geometry_mesh(
+				// 	device.stream(),
+				// 	normals_fun,
+				// 	device.render_buffer_view(),
+				// 	focal_length,
+				// 	camera_matrix0,
+				// 	screen_center,
+				// 	foveation,
+				// 	visualized_dimension
+				// );
+
+
+
+
+				distance_fun_t distance_fun =
+					m_render_ground_truth ? (distance_fun_t)[&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
+						if (m_geometry.mesh_cpu[0].sdf.groundtruth_mode == ESDFGroundTruthMode::SDFBricks) {
+						} else {
+							m_geometry.mesh_cpu[0].sdf.triangle_bvh->signed_distance_gpu(
+								n_elements,
+								m_geometry.mesh_cpu[0].sdf.mesh_sdf_mode,
+								positions,
+								distances,
+								m_geometry.mesh_cpu[0].sdf.triangles_gpu.data(),
+								false,
+								stream
+							);
+						}
+					} : (distance_fun_t)[&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
+						n_elements = next_multiple(n_elements, BATCH_SIZE_GRANULARITY);
+						GPUMatrix<float> positions_matrix((float*)positions, 3, n_elements);
+						GPUMatrix<float, RM> distances_matrix(distances, 1, n_elements);
+						m_network->inference(stream, positions_matrix, distances_matrix);
+					};
+
+				normals_fun_t normals_fun =
+					m_render_ground_truth ? (normals_fun_t)[&](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
+						// NO-OP. Normals will automatically be populated by raytrace
+					} : (normals_fun_t)[&](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
+						n_elements = next_multiple(n_elements, BATCH_SIZE_GRANULARITY);
+						GPUMatrix<float> positions_matrix((float*)positions, 3, n_elements);
+						GPUMatrix<float> normals_matrix((float*)normals, 3, n_elements);
+						m_network->input_gradient(stream, 0, positions_matrix, normals_matrix);
+					};
+
+				render_geometry_mesh(
+					device.stream(),
+					distance_fun,
+					normals_fun,
+					device.render_buffer_view(),
+					focal_length,
+					camera_matrix0,
+					screen_center,
+					foveation,
+					visualized_dimension
+				);
+
+
+				// render_geometry_nerf(device.stream(), device, device.render_buffer_view(), device.nerf_network(), device.data().density_grid_bitfield_ptr, focal_length, camera_matrix0, camera_matrix1, nerf_rolling_shutter, screen_center, foveation, visualized_dimension);
+			
+			}
 			break;
 		default:
 			// No-op if no mode is active
@@ -4871,6 +5056,7 @@ void Testbed::load_snapshot(nlohmann::json config) {
 }
 
 void Testbed::load_snapshot(const fs::path& path) {
+	tlog::info() << "Loading snapshot '" << path.str() << "'";
 	auto config = load_network_config(path);
 	if (!config.contains("snapshot")) {
 		throw std::runtime_error{fmt::format("File '{}' does not contain a snapshot.", path.str())};
@@ -4882,6 +5068,7 @@ void Testbed::load_snapshot(const fs::path& path) {
 }
 
 void Testbed::load_snapshot(std::istream& stream, bool is_compressed) {
+	tlog::info() << "Loading snapshot from stream";
 	auto config = load_network_config(stream, is_compressed);
 	if (!config.contains("snapshot")) {
 		throw std::runtime_error{"Given stream does not contain a snapshot."};

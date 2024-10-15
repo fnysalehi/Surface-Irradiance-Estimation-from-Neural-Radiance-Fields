@@ -170,6 +170,7 @@ class MyTracer {
 		);
 
 		void init_rays_from_data_mesh(uint32_t n_elements, const RaysMeshSoa& data, cudaStream_t stream);
+		void init_rays_from_data_mesh_multiple(uint32_t n_elements, cudaStream_t stream);
 		uint32_t trace_mesh_bvh(GeometryBvh* bvh, const MeshData* meshes, cudaStream_t stream);
 		uint32_t trace_bvh(TriangleBvh* bvh, const Triangle* triangles, cudaStream_t stream);
 
@@ -305,7 +306,63 @@ class MyTracer {
 			cudaStream_t stream
 		);
 
+		void init_rays_from_center(
+			uint32_t numSamplesTheta,
+			uint32_t numSamplesPhi,
+			uint32_t padded_output_width,
+			uint32_t n_extra_dims,
+			const BoundingBox& render_aabb,	// nerf aabb 
+			const mat3& render_aabb_to_local,
+			cudaStream_t stream
+		);
+
+		void init_rays_from_center_outward(
+			uint32_t numSamplesTheta,
+			uint32_t numSamplesPhi,
+			uint32_t padded_output_width,
+			uint32_t n_extra_dims,
+			const BoundingBox& render_aabb,	// nerf aabb 
+			const mat3& render_aabb_to_local,
+			const vec3& origin,
+			cudaStream_t stream
+		);
+		
+		void init_rays_from_multiple_center(
+			uint32_t numSamplesTheta,
+			uint32_t numSamplesPhi,
+			uint32_t numSamplesOrigin,
+			uint32_t padded_output_width,
+			uint32_t n_extra_dims,
+			const BoundingBox& render_aabb,	// nerf aabb 
+			const mat3& render_aabb_to_local,
+			cudaStream_t stream
+		);
+
 		uint32_t trace(
+			const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
+			const BoundingBox& render_aabb,
+			const mat3& render_aabb_to_local,
+			const BoundingBox& train_aabb,
+			const vec2& focal_length,
+			float cone_angle_constant,
+			const uint8_t* grid,
+			ERenderMode render_mode,
+			const mat4x3 &camera_matrix,
+			float depth_scale,
+			int visualized_layer,
+			int visualized_dim,
+			ENerfActivation rgb_activation,
+			ENerfActivation density_activation,
+			int show_accel,
+			uint32_t max_mip,
+			float min_transmittance,
+			float glow_y_cutoff,
+			int glow_mode,
+			const float* extra_dims_gpu,
+			cudaStream_t stream
+		);
+
+		uint32_t trace_mesh(
 			const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
 			const BoundingBox& render_aabb,
 			const mat3& render_aabb_to_local,
@@ -334,6 +391,23 @@ class MyTracer {
 		RaysNerfSoa& rays_init() { return m_rays[0]; }
 		uint32_t n_rays_initialized() const { return m_n_rays_initialized; }
 
+		void init_rays_from_data(
+    		uint32_t n_elements, 
+			uint32_t padded_output_width, 
+			uint32_t n_extra_dims, 
+			cudaStream_t stream
+		);
+
+		uint32_t shade_from_nerf(
+			const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
+			const BoundingBox& render_aabb,
+			float min_transmittance,
+			uint32_t n_elements,
+			cudaStream_t stream
+		);
+		void set_shadow_sharpness(float val) { m_shadow_sharpness_mesh = val; }
+		void set_trace_shadow_rays(bool val) { m_trace_shadow_rays_mesh = val; }
+
 	private:
 		RaysNerfSoa m_rays[2];
 		RaysNerfSoa m_rays_hit;
@@ -343,6 +417,9 @@ class MyTracer {
 		uint32_t* m_alive_counter;
 		uint32_t m_n_rays_initialized = 0;
 		GPUMemoryArena::Allocation m_scratch_alloc;
+		bool m_trace_shadow_rays_mesh = false;
+		float m_shadow_sharpness_mesh = 2048.f;
+
 	};
 
 	class FiniteDifferenceNormalsApproximator {
@@ -459,7 +536,12 @@ class MyTracer {
 		const mat4x3& camera_matrix,
 		const vec2& screen_center,
 		const Foveation& foveation,
-		int visualized_dimension
+		int visualized_dimension,
+		CudaDevice& device,
+		const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network,
+		const uint8_t* density_grid_bitfield,
+		const mat4x3& camera_matrix1,
+		const vec4& rolling_shutter
 	);
 	void render_geometry_nerf(
 		cudaStream_t stream,
@@ -530,6 +612,8 @@ class MyTracer {
 	void load_nerf_post();
 	void load_nerf(Nerf* nerf, const fs::path& data_path, const vec3 center);
 	void load_nerf_post(Nerf* nerf, const vec3 center);
+		void load_nerf(const fs::path& data_path, const vec3 center);
+	void load_nerf_post(const vec3 center);
 	void load_empty_nerf(Nerf* nerf, vec3 center);
 
 	void load_mesh(const fs::path& data_path);
@@ -547,6 +631,8 @@ class MyTracer {
 	void mouse_wheel();
 	void load_file(const fs::path& path);
 	void set_nerf_camera_matrix(const mat4x3& cam);
+	void set_geometry_nerf_camera_matrix(const mat4x3& cam);
+
 	vec3 look_at() const;
 	void set_look_at(const vec3& pos);
 	float scale() const { return m_scale; }
@@ -561,17 +647,30 @@ class MyTracer {
 	void previous_training_view();
 	void next_training_view();
 	void set_camera_to_training_view(int trainview);
+	void first_training_view_geometry();
+	void last_training_view_geometry();
+	void previous_training_view_geometry();
+	void next_training_view_geometry();
+	void set_camera_to_training_view_geometry(int trainview);
 	void reset_camera();
 	bool keyboard_event();
+	bool update_meshes();
 	void generate_training_samples_sdf(vec3* positions, float* distances, uint32_t n_to_generate, cudaStream_t stream, bool uniform_only);
 	void generate_training_samples_sdf_geometry(vec3* positions, float* distances, uint32_t n_to_generate, cudaStream_t stream, bool uniform_only);
 
 	void update_density_grid_nerf(float decay, uint32_t n_uniform_density_grid_samples, uint32_t n_nonuniform_density_grid_samples, cudaStream_t stream);
 	void update_density_grid_mean_and_bitfield(cudaStream_t stream);
+	void update_density_grid_mean_and_bitfield_geometry(cudaStream_t stream);
 	void mark_density_grid_in_sphere_empty(const vec3& pos, float radius, cudaStream_t stream);
+
+	void update_density_grid_nerf_geometry(float decay, uint32_t n_uniform_density_grid_samples, uint32_t n_nonuniform_density_grid_samples, cudaStream_t stream);
+
 
 	void train_nerf(uint32_t target_batch_size, bool get_loss_scalar, cudaStream_t stream);
 	void train_nerf_step(uint32_t target_batch_size, NerfCounters& counters, cudaStream_t stream);
+	void train_nerf_geometry(uint32_t target_batch_size, bool get_loss_scalar, cudaStream_t stream);
+	void train_nerf_step_geometry(uint32_t target_batch_size, NerfCounters& counters, cudaStream_t stream);
+	
 	void train_sdf(size_t target_batch_size, bool get_loss_scalar, cudaStream_t stream);
 	void train_sdf_geometry(size_t target_batch_size, bool get_loss_scalar, cudaStream_t stream);
 	void train_image(size_t target_batch_size, bool get_loss_scalar, cudaStream_t stream);
@@ -583,6 +682,7 @@ class MyTracer {
 	void prepare_next_camera_path_frame();
 	void imgui();
 	void training_prep_nerf(uint32_t batch_size, cudaStream_t stream);
+	void training_prep_nerf_geometry(uint32_t batch_size, cudaStream_t stream);
 	void training_prep_sdf(uint32_t batch_size, cudaStream_t stream);
 	void training_prep_image(uint32_t batch_size, cudaStream_t stream) {}
 	void training_prep_geometry(uint32_t batch_size, cudaStream_t stream);
@@ -592,9 +692,11 @@ class MyTracer {
 	void optimise_mesh_step(uint32_t N_STEPS);
 	void compute_mesh_vertex_colors();
 	GPUMemory<float> get_density_on_grid(ivec3 res3d, const BoundingBox& aabb, const mat3& render_aabb_to_local); // network version (nerf or sdf)
+	GPUMemory<float> get_density_on_grid_geometry(ivec3 res3d, const BoundingBox& aabb, const mat3& render_aabb_to_local); // network version (nerf or sdf)
 	GPUMemory<float> get_sdf_gt_on_grid(ivec3 res3d, const BoundingBox& aabb, const mat3& render_aabb_to_local); // sdf gt version (sdf only)
 	GPUMemory<float> get_sdf_gt_on_grid_geometry(ivec3 res3d, const BoundingBox& aabb, const mat3& render_aabb_to_local); // sdf gt version (sdf only)
 	GPUMemory<vec4> get_rgba_on_grid(ivec3 res3d, vec3 ray_dir, bool voxel_centers, float depth, bool density_as_alpha = false);
+	GPUMemory<vec4> get_rgba_on_grid_geometry(ivec3 res3d, vec3 ray_dir, bool voxel_centers, float depth, bool density_as_alpha = false);
 	int marching_cubes(ivec3 res3d, const BoundingBox& render_aabb, const mat3& render_aabb_to_local, float thresh);
 
 	float get_depth_from_renderbuffer(const CudaRenderBuffer& render_buffer, const vec2& uv);
@@ -603,6 +705,42 @@ class MyTracer {
 	size_t n_params();
 	size_t first_encoder_param();
 	size_t n_encoding_params();
+
+	void computeEnvmap(
+    		ivec2 numSamples,
+			cudaTextureObject_t *pTexObject,
+    		const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network, 
+			const BoundingBox& nerfBoundingBox,
+			const BoundingBox& render_aabb,
+			const mat3 render_aabb_to_local,
+    		float focal_length, 
+    		ERenderMode render_mode, 
+    		mat4 camera_matrix1, 
+    		uint32_t m_visualized_layer, 
+    		uint32_t visualized_dimension, 
+			const uint8_t* density_grid_bitfield,
+    		cudaStream_t stream
+		); 
+
+	void computeEnvmapMultiple(
+    	ivec2 numSamples,
+		uint32_t numSamplesOrigin,
+		cudaTextureObject_t *envmapTex,
+    	const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network, 
+		const BoundingBox& nerfBoundingBox,
+		const BoundingBox& render_aabb,
+		const mat3 render_aabb_to_local,
+    	float focal_length, 
+    	ERenderMode render_mode, 
+    	mat4 camera_matrix1, 
+    	uint32_t m_visualized_layer, 
+    	uint32_t visualized_dimension, 
+		const uint8_t* density_grid_bitfield,
+    	cudaStream_t stream
+	); 
+
+	void computeEnvmapMultipleMain(); 
+	void computeEnvmapGrid(); 
 
 #ifdef NGP_PYTHON
 	pybind11::dict compute_marching_cubes_mesh(ivec3 res3d = ivec3(128), BoundingBox aabb = BoundingBox{vec3(0.0f), vec3(1.0f)}, float thresh=2.5f);
@@ -696,7 +834,7 @@ class MyTracer {
 
 	bool m_include_optimizer_state_in_snapshot = false;
 	bool m_compress_snapshot = true;
-	bool m_render_ground_truth = true;
+	bool m_render_ground_truth = false;
 	EGroundTruthRenderMode m_ground_truth_render_mode = EGroundTruthRenderMode::Shade;
 	float m_ground_truth_alpha = 1.0f;
 
@@ -739,7 +877,7 @@ class MyTracer {
 	float m_bounding_radius = 1;
 	float m_exposure = 0.f;
 
-	ERenderMode m_render_mode = ERenderMode::AO;
+	ERenderMode m_render_mode = ERenderMode::ShadeGridEnvMap;
 	EMeshRenderMode m_mesh_render_mode = EMeshRenderMode::VertexNormals;
 
 	uint32_t m_seed = 1337;
@@ -793,7 +931,6 @@ class MyTracer {
 
 	Sdf m_sdf;
 
-	
 	struct Geometry {
 
 		ESDFGroundTruthMode groundtruth_mode = ESDFGroundTruthMode::RaytracedMesh;
@@ -802,11 +939,16 @@ class MyTracer {
 
 		std::vector<Nerf> nerf_cpu;
 
+		Nerf nerf;
 	    std::shared_ptr<GeometryBvh> geometry_mesh_bvh;
 		std::shared_ptr<GeometryBvh> geometry_nerf_bvh;
+		BoundingBox nerfBoundingBox;
 
 		BRDFParams brdf;
 
+		cudaTextureObject_t m_envmap_tex = 0;	
+		ivec2 gridSize;
+		
 	} m_geometry;
 
 	enum EDataType {
@@ -1043,6 +1185,7 @@ class MyTracer {
 
 		void set_network(const std::shared_ptr<Network<float, network_precision_t>>& network);
 		void set_nerf_network(const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network);
+		void set_geometry_nerf_network(const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network);
 
 		const std::shared_ptr<Network<float, network_precision_t>>& network() const {
 			return m_network;
@@ -1052,11 +1195,16 @@ class MyTracer {
 			return m_nerf_network;
 		}
 
+		const std::shared_ptr<NerfNetwork<network_precision_t>>& geometry_nerf_network() const {
+			return m_geometry_nerf_network;
+		}
+
 		void clear() {
 			m_data = std::make_unique<Data>();
 			m_render_buffer_view = {};
 			m_network = {};
 			m_nerf_network = {};
+			m_geometry_nerf_network = {};
 			set_dirty(true);
 		}
 
@@ -1098,6 +1246,7 @@ class MyTracer {
 
 		std::shared_ptr<Network<float, network_precision_t>> m_network;
 		std::shared_ptr<NerfNetwork<network_precision_t>> m_nerf_network;
+		std::shared_ptr<NerfNetwork<network_precision_t>> m_geometry_nerf_network;
 
 		bool m_dirty = true;
 
@@ -1192,6 +1341,7 @@ class MyTracer {
 	} m_distortion;
 
 	std::shared_ptr<NerfNetwork<network_precision_t>> m_nerf_network;
+	std::shared_ptr<NerfNetwork<network_precision_t>> m_geometry_nerf_network;
 };
 
 }

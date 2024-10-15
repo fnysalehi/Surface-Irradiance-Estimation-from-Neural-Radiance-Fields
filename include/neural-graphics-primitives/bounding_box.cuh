@@ -218,6 +218,94 @@ struct BoundingBox {
 		return { tmin, tmax };
 	}
 
+	NGP_HOST_DEVICE std::tuple<vec2, Face> ray_intersect_with_face(const vec3& pos, const vec3& dir) const {
+    	float tmin = (min.x - pos.x) / dir.x;
+    	float tmax = (max.x - pos.x) / dir.x;
+    	Face face = dir.x < 0 ? Face::Right : Face::Left;
+	
+    	if (tmin > tmax) {
+    	    host_device_swap(tmin, tmax);
+    	}
+	
+    	float tymin = (min.y - pos.y) / dir.y;
+    	float tymax = (max.y - pos.y) / dir.y;
+	
+    	if (tymin > tymax) {
+    	    host_device_swap(tymin, tymax);
+    	}
+	
+    	if (tmin > tymax || tymin > tmax) {
+    	    return { { std::numeric_limits<float>::max(), std::numeric_limits<float>::max() }, Face::NONE };
+    	}
+	
+    	if (tymin > tmin) {
+    	    tmin = tymin;
+    	    face = dir.y < 0 ? Face::Top : Face::Bottom;
+    	}
+	
+    	if (tymax < tmax) {
+    	    tmax = tymax;
+    	}
+	
+    	float tzmin = (min.z - pos.z) / dir.z;
+    	float tzmax = (max.z - pos.z) / dir.z;
+	
+    	if (tzmin > tzmax) {
+    	    host_device_swap(tzmin, tzmax);
+    	}
+	
+    	if (tmin > tzmax || tzmin > tmax) {
+    	    return { { std::numeric_limits<float>::max(), std::numeric_limits<float>::max() }, Face::NONE };
+    	}
+	
+    	if (tzmin > tmin) {
+    	    tmin = tzmin;
+    	    face = dir.z < 0 ? Face::Front : Face::Back;
+    	}
+	
+    	if (tzmax < tmax) {
+    	    tmax = tzmax;
+    	}
+	
+    	return { { tmin, tmax }, face };
+	}
+
+	NGP_HOST_DEVICE vec3 ray_intersect_sphere(const vec3& pos, const vec3& dir) const {
+    	
+		vec3 center = 0.5f * (max + min); 
+		float radius = length(diag()) / 2.0f;
+
+		vec3 oc = pos - center;
+
+    	float a = dot(dir, dir);
+    	float b = 2.0f * dot(oc, dir);
+    	float c = dot(oc, oc) - radius * radius;
+
+    	float discriminant = b * b - 4 * a * c;
+    	
+		if (discriminant < 0) {
+    	    return {vec3(std::numeric_limits<float>::quiet_NaN())};
+    	} 
+		
+		else {
+    	    float t1 = (-b - sqrt(discriminant)) / (2.0f * a);
+    	    float t2 = (-b + sqrt(discriminant)) / (2.0f * a);
+
+			vec3 P1 = pos + t1 * dir;
+        	vec3 P2 = pos + t2 * dir;
+
+        	// Return the closer intersection point
+			vec3 P = length(P1 - pos) < length(P2 - pos) ? P1 : P2;
+			
+			return P;
+			// return dir_to_spherical(P);
+			// Convert intersection point from Cartesian coordinates to normalized spherical coordinates
+        	// [0, 1] for both theta and phi
+			// return dir_to_spherical_unorm(P);
+        	
+    	}
+	}
+
 	NGP_HOST_DEVICE bool is_empty() const {
 		return max.x < min.x || max.y < min.y || max.z < min.z;
 	}
@@ -237,6 +325,10 @@ struct BoundingBox {
 	NGP_HOST_DEVICE float distance_sq(const vec3& p) const {
 		return length2(tcnn::max(tcnn::max(min - p, p - max), vec3(0.0f)));
 	}
+
+	NGP_HOST_DEVICE float radius() const {
+    return length(diag()) / 2.0f;
+}
 
 	NGP_HOST_DEVICE float signed_distance(const vec3& p) const {
 		vec3 q = abs(p - min) - diag();
@@ -258,6 +350,17 @@ struct BoundingBox {
 		min += translation;
 		max += translation;
 	}
+
+	NGP_HOST_DEVICE vec3 normal(const vec3& point) const {
+		if (abs(point.x - min.x) < 0.0001f) return vec3(-1.0f, 0.0f, 0.0f);
+		if (abs(point.x - max.x) < 0.0001f) return vec3(1.0f, 0.0f, 0.0f);
+		if (abs(point.y - min.y) < 0.0001f) return vec3(0.0f, -1.0f, 0.0f);
+		if (abs(point.y - max.y) < 0.0001f) return vec3(0.0f, 1.0f, 0.0f);
+		if (abs(point.z - min.z) < 0.0001f) return vec3(0.0f, 0.0f, -1.0f);
+		if (abs(point.z - max.z) < 0.0001f) return vec3(0.0f, 0.0f, 1.0f);
+		return vec3(0.0f, 0.0f, 0.0f); // point is not on the surface of the box
+	}
+	
 
 	vec3 min = vec3(std::numeric_limits<float>::infinity());
 	vec3 max = vec3(-std::numeric_limits<float>::infinity());

@@ -396,6 +396,15 @@ __global__ void generate_nerf_network_inputs_at_current_position(const uint32_t 
 	network_input(i)->set_with_optional_extra_dims(warp_position(payloads[i].origin + dir * payloads[i].t, aabb), warp_direction(dir), warp_dt(MIN_CONE_STEPSIZE()), extra_dims, network_input.stride_in_bytes);
 }
 
+__global__ void generate_nerf_network_inputs_from_positions_cosine(const uint32_t n_elements, BoundingBox aabb, const vec3* __restrict__ pos, PitchedPtr<NerfCoordinate> network_input, const float* extra_dims, default_rng_t rng) {
+    const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i >= n_elements) return;
+
+	vec3 dir = random_dir_cosine(rng);
+
+    network_input(i)->set_with_optional_extra_dims(warp_position(pos[i], aabb), warp_direction(dir), warp_dt(MIN_CONE_STEPSIZE()), extra_dims, network_input.stride_in_bytes);
+}
+
 __device__ vec4 compute_nerf_rgba(const vec4& network_output, ENerfActivation rgb_activation, ENerfActivation density_activation, float depth, bool density_as_alpha = false) {
 	vec4 rgba = network_output;
 
@@ -467,6 +476,55 @@ __global__ void generate_next_nerf_network_inputs(
 	payload.n_steps = n_steps;
 }
 
+__global__ void generate_next_nerf_network_inputs_geometry(
+	const uint32_t n_elements,
+	BoundingBox render_aabb,
+	mat3 render_aabb_to_local,
+	BoundingBox train_aabb,
+	vec2 focal_length,
+	vec3 camera_fwd,
+	NerfPayload* __restrict__ payloads,
+	PitchedPtr<NerfCoordinate> network_input,
+	uint32_t n_steps,
+	const uint8_t* __restrict__ density_grid,
+	uint32_t min_mip,
+	uint32_t max_mip,
+	float cone_angle_constant,
+	const float* extra_dims
+) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	if (i >= n_elements) return;
+
+	NerfPayload& payload = payloads[i];
+
+	if (!payload.alive) {
+		return;
+	}
+
+	vec3 origin = payload.origin;
+	vec3 dir = payload.dir;
+	vec3 idir = vec3(1.0f) / dir;
+	
+	float cone_angle = calc_cone_angle(dot(dir, camera_fwd), focal_length, cone_angle_constant);
+	
+	float t = payload.t;
+	
+	for (uint32_t j = 0; j < n_steps; ++j) {
+		t = if_unoccupied_advance_to_next_occupied_voxel_geometry(t, cone_angle, {origin, dir}, idir, density_grid, min_mip, max_mip, render_aabb, render_aabb_to_local);
+		if (t >= MAX_DEPTH()) {
+			payload.n_steps = j;
+			return;
+		}
+		
+		float dt = calc_dt(t, cone_angle);
+		network_input(i + j * n_elements)->set_with_optional_extra_dims(warp_position(origin + dir * t, train_aabb), warp_direction(dir), warp_dt(dt), extra_dims, network_input.stride_in_bytes); // XXXCONE
+		t += dt;
+	}
+	
+	payload.t = t;
+	payload.n_steps = n_steps;
+}
+
 __global__ void composite_kernel_nerf(
 	const uint32_t n_elements,
 	const uint32_t stride,
@@ -528,7 +586,8 @@ __global__ void composite_kernel_nerf(
 
 		vec3 rgb = network_to_rgb_vec(local_network_output, rgb_activation);
 
-		if (glow_mode) { // random grid visualizations ftw!
+		if (glow_mode) 
+		{ // random grid visualizations ftw!
 #if 0
 			if (0) {  // extremely startrek edition
 				float glow_y = (pos.y - (glow_y_cutoff - 0.5f)) * 2.f;
@@ -1428,7 +1487,10 @@ __global__ void init_rays_with_payload_kernel_nerf(
 	NerfPayload& payload = payloads[idx];
 	payload.max_weight = 0.0f;
 
-	depth_buffer[idx] = MAX_DEPTH();
+	if (depth_buffer == nullptr || depth_buffer[idx] < 0.01) {
+
+		depth_buffer[idx] = MAX_DEPTH();
+	}
 
 	if (!ray.is_valid()) {
 		payload.origin = ray.o;
@@ -1480,6 +1542,236 @@ __global__ void init_rays_with_payload_kernel_nerf(
 	payload.n_steps = 0;
 	payload.alive = true;
 }
+
+inline __host__ __device__ vec3 cylindrical_to_dir_nerf(const vec2& p) {
+	// printf("p: %f %f\n", p.x, p.y);
+	const float cos_theta = -2.0f * p.x + 1.0f;
+	const float phi = 2.0f * PI() * (p.y - 0.5f);
+	// printf("cos_theta: %f, phi: %f\n", cos_theta, phi);
+	// printf("phi: %f\n", phi);
+	const float sin_theta = sqrtf(fmaxf(1.0f - cos_theta * cos_theta, 0.0f));
+	float sin_phi, cos_phi;
+	sincosf(phi, &sin_phi, &cos_phi);
+
+	return {sin_theta * cos_phi, sin_theta * sin_phi, cos_theta};
+}
+
+__global__ void init_rays_from_center_with_payload_kernel_nerf(
+	uint32_t numSamplesTheta,
+	uint32_t numSamplesPhi,
+	NerfPayload* __restrict__ payloads,
+	BoundingBox render_aabb,
+	mat3 render_aabb_to_local
+) {
+	// 0 < theta < pi
+	// 0 < phi < 2pi 
+	uint32_t thetaMul = threadIdx.x + blockDim.x * blockIdx.x;
+	uint32_t phiMul = threadIdx.y + blockDim.y * blockIdx.y;
+
+	uint32_t idx = thetaMul + numSamplesTheta * phiMul;
+	// printf("theta mul: %d\n", thetaMul);
+
+	if (thetaMul >= numSamplesTheta || phiMul >= numSamplesPhi) {
+		return;
+	}
+	
+	// printf("theta mul : %d, phi mul: %d\n", thetaMul, phiMul);
+	vec3 origin = render_aabb.center(); 
+
+	// float theta = 2.0f * PI() * (thetaMul + 0.5) / numSamplesTheta; 
+	// float phi = PI() * (phiMul + 0.5) / numSamplesPhi;
+	
+	// 0 < thetaMul/numSamplesTheta < 1
+	// 0 < phiMul/numSamplesPhi < 1
+	
+	// -1 < cos_theta < 1
+	// -PI < phi < PI
+	// otherwise I should change so 0.5 < phiMul/numSamplesPhi < 1.5 => phiMul/numSamplesPhi + 0.5
+	float cos_theta = static_cast<float>(thetaMul)/numSamplesTheta;
+	float phi = static_cast<float>(phiMul)/numSamplesPhi;
+
+	vec3 dir = cylindrical_to_dir_nerf(vec2(cos_theta, phi));
+	// printf("dir from init: %f %f %f\n", dir.x, dir.y, dir.z);
+
+	Ray ray{origin, dir};
+
+	NerfPayload& payload = payloads[idx];
+	payload.max_weight = 0.0f;
+
+	ray.d = normalize(ray.d);
+
+	payload.origin = ray.o;
+	payload.dir = ray.d;
+	payload.t = 0.0f;
+	payload.idx = idx;
+	payload.n_steps = 0;
+	payload.alive = true;
+}
+
+__global__ void init_rays_from_center_outward_with_payload_kernel_nerf(
+	uint32_t numSamplesTheta,
+	uint32_t numSamplesPhi,
+	NerfPayload* __restrict__ payloads,
+	BoundingBox nerf_aabb,
+	mat3 render_aabb_to_local,
+	vec3 origin
+) {
+	// 0 < theta < pi
+	// 0 < phi < 2pi 
+	uint32_t thetaMul = threadIdx.x + blockDim.x * blockIdx.x;
+	uint32_t phiMul = threadIdx.y + blockDim.y * blockIdx.y;
+
+	uint32_t idx = thetaMul + numSamplesTheta * phiMul;
+	// printf("theta mul: %d\n", thetaMul);
+
+	if (thetaMul >= numSamplesTheta || phiMul >= numSamplesPhi) {
+		return;
+	}
+	
+	// printf("theta mul : %d, phi mul: %d\n", thetaMul, phiMul);
+	// float theta = 2.0f * PI() * (thetaMul + 0.5) / numSamplesTheta; 
+	// float phi = PI() * (phiMul + 0.5) / numSamplesPhi;
+	
+	// 0 < thetaMul/numSamplesTheta < 1
+	// 0 < phiMul/numSamplesPhi < 1
+	
+	// -1 < cos_theta < 1
+	// -PI < phi < PI
+	// otherwise I should change so 0.5 < phiMul/numSamplesPhi < 1.5 => phiMul/numSamplesPhi + 0.5
+	float cos_theta = static_cast<float>(thetaMul)/numSamplesTheta;
+	float phi = static_cast<float>(phiMul)/numSamplesPhi;
+
+	// printf("inside of calculation: cos_theta: %f, phi: %f\n", cos_theta, phi);
+	// Calculate the local frame for the cell center
+	// (origin - render_aabb.center()) starts from the center of the bounding box towards the origin
+    // vec3 normal = normalize(origin - nerf_aabb.center());
+	vec3 normal = normalize(origin);
+    mat3 localFrame = compute_local_frame(normal);
+
+	vec3 localDir = cylindrical_to_dir_nerf(vec2(cos_theta, phi));
+
+    // Transform the ray directions to the world frame
+    vec3 dir = localFrame * localDir;
+
+    // Create the ray
+    Ray ray = {origin, dir};
+
+	// printf("dir from init: %f %f %f\n", dir.x, dir.y, dir.z);
+
+	NerfPayload& payload = payloads[idx];
+	payload.max_weight = 0.0f;
+
+	ray.d = normalize(ray.d);
+
+	payload.origin = ray.o;// + nerf_aabb.center();
+	// to make the rays go inside of the bounding box to trace them
+	payload.dir = -ray.d;
+	payload.t = 0.0f;
+	payload.idx = idx;
+	payload.n_steps = 0;
+	payload.alive = true;
+}
+
+
+__global__ void init_rays_from_multiple_center_with_payload_kernel_nerf(
+	uint32_t numSamplesTheta,
+	uint32_t numSamplesPhi,
+	uint32_t numSamplesOrigin,
+	NerfPayload* __restrict__ payloads,
+	BoundingBox render_aabb,
+	mat3 render_aabb_to_local
+) {
+	// 0 < theta < pi
+	// 0 < phi < 2pi 
+	
+	uint32_t thetaMulmultiple = threadIdx.x + blockDim.x * blockIdx.x;
+	uint32_t phiMulmultipe = threadIdx.y + blockDim.y * blockIdx.y;
+	
+	uint32_t thetaMul = thetaMulmultiple / numSamplesOrigin;
+	uint32_t thetaRemainder = thetaMulmultiple % numSamplesOrigin;
+
+	uint32_t phiMul = phiMulmultipe / numSamplesOrigin;
+	uint32_t phiRemainder = phiMulmultipe % numSamplesOrigin;
+
+	uint32_t mulidx = thetaMulmultiple + numSamplesTheta * numSamplesOrigin * phiMulmultipe;
+	
+	uint32_t idx = thetaMul + numSamplesTheta * phiMul;
+
+	if (thetaMul >= numSamplesTheta || phiMul >= numSamplesPhi) {
+		return;
+	}
+	
+	// printf("theta mul : %d, phi mul: %d\n", thetaMul, phiMul);
+	vec3 origin = render_aabb.center(); 
+
+	// maybe halton23_kernel n_elements, (size_t)batch_size * m_training_step
+	// uint32_t caseNum = (thetaMulmultiple + phiMulmultipe) % 4;
+
+	// switch (caseNum) {
+	//     case 1:
+	//         // Add 0.25 to the x-coordinate
+	//         origin.x += 0.1;
+	// 		origin.z += 0.1;
+	//         break;
+	//     case 2:
+	//         // Subtract 0.25 from the x-coordinate
+	// 		origin.z -= 0.1;
+	//         origin.x -= 0.1;
+	//         break;
+	//     case 3:
+	//         // Add 0.25 to the y-coordinate
+	// 		origin.x += 0.1;
+	// 		origin.z -= 0.1;
+	//         break;
+	//     case 4:
+	//         // Subtract 0.25 from the y-coordinate
+	//         origin.z -= 0.1;
+	//         break;
+	// }
+
+	uint32_t halton_index = thetaRemainder * numSamplesOrigin + phiRemainder;
+
+	float offsetX = halton<2>(halton_index) - 0.5;  // Subtract 0.5 to make the offset range from -0.5 to 0.5
+	float offsetY = halton<3>(halton_index) - 0.5;
+	float offsetZ = halton<5>(halton_index) - 0.5;
+
+	// // Scale the offset by 
+	// offsetX *= 0.5;
+	// offsetY *= 0.5;
+	// offsetZ *= 0.5;
+
+	// Add the offset to the ray origin
+	origin += vec3(offsetX, offsetY, offsetZ);
+
+	// origin += vec3(halton<2>(thetaRemainder), 0.0 , halton<3>(phiRemainder));
+
+	// 0 < thetaMul/numSamplesTheta < 1
+	// 0 < phiMul/numSamplesPhi < 1
+	
+	// -1 < cos_theta < 1
+	// -PI < phi < PI
+
+	float cos_theta = static_cast<float>(thetaMul)/numSamplesTheta;
+	float phi = static_cast<float>(phiMul)/numSamplesPhi;
+
+	vec3 dir = cylindrical_to_dir_nerf(vec2(cos_theta, phi));
+	// printf("dir from init: %f %f %f\n", dir.x, dir.y, dir.z);
+
+	Ray ray{origin, dir};
+
+	NerfPayload& payload = payloads[mulidx];
+	payload.max_weight = 0.0f;
+
+	ray.d = normalize(ray.d);
+
+	payload.origin = ray.o;
+	payload.dir = ray.d;
+	payload.t = 0.0f;
+	payload.idx = idx;
+	payload.n_steps = 0;
+	payload.alive = true;
+}
+
 
 static constexpr float MIN_PDF = 0.01f;
 
@@ -1629,6 +1921,104 @@ void Testbed::NerfTracer::init_rays_from_camera(
 	);
 }
 
+void Testbed::NerfTracer::init_rays_from_center(
+	uint32_t numSamplesTheta,
+	uint32_t numSamplesPhi,
+	uint32_t padded_output_width,
+	uint32_t n_extra_dims,
+	const BoundingBox& render_aabb,	// nerf aabb 
+	const mat3& render_aabb_to_local,
+	cudaStream_t stream
+) {
+	// Make sure we have enough memory reserved to render at the requested resolution
+	size_t n_rays = (size_t)numSamplesPhi * numSamplesTheta;
+	enlarge(n_rays, padded_output_width, n_extra_dims, stream);
+
+	const dim3 threads = { 16, 8, 1 };
+
+	const dim3 blocks = { div_round_up((uint32_t)numSamplesTheta, threads.x), div_round_up((uint32_t)numSamplesPhi, threads.y), 1 };
+	
+	init_rays_from_center_with_payload_kernel_nerf<<<blocks, threads, 0, stream>>>(
+		numSamplesTheta,
+		numSamplesPhi,
+		m_rays[0].payload,
+		render_aabb,
+		render_aabb_to_local
+	);
+
+	m_n_rays_initialized = numSamplesPhi * numSamplesTheta;
+
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_rays[0].rgba, 0, m_n_rays_initialized * sizeof(vec4), stream));
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_rays[0].depth, 0, m_n_rays_initialized * sizeof(float), stream));
+}
+
+void Testbed::NerfTracer::init_rays_from_center_outward(
+	uint32_t numSamplesTheta,
+	uint32_t numSamplesPhi,
+	uint32_t padded_output_width,
+	uint32_t n_extra_dims,
+	const BoundingBox& render_aabb,	// nerf aabb 
+	const mat3& render_aabb_to_local,
+	const vec3& origin,
+	cudaStream_t stream
+) {
+	// Make sure we have enough memory reserved to render at the requested resolution
+	size_t n_rays = (size_t)numSamplesPhi * numSamplesTheta;
+	enlarge(n_rays, padded_output_width, n_extra_dims, stream);
+
+	const dim3 threads = { 16, 8, 1 };
+
+	const dim3 blocks = { div_round_up((uint32_t)numSamplesTheta, threads.x), div_round_up((uint32_t)numSamplesPhi, threads.y), 1 };
+	
+	init_rays_from_center_outward_with_payload_kernel_nerf<<<blocks, threads, 0, stream>>>(
+		numSamplesTheta,
+		numSamplesPhi,
+		m_rays[0].payload,
+		render_aabb,
+		render_aabb_to_local,
+		origin
+	);
+
+	m_n_rays_initialized = numSamplesPhi * numSamplesTheta;
+
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_rays[0].rgba, 0, m_n_rays_initialized * sizeof(vec4), stream));
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_rays[0].depth, 0, m_n_rays_initialized * sizeof(float), stream));
+}
+
+void Testbed::NerfTracer::init_rays_from_multiple_center(
+	uint32_t numSamplesTheta,
+	uint32_t numSamplesPhi,
+	uint32_t numSamplesOrigin,
+	uint32_t padded_output_width,
+	uint32_t n_extra_dims,
+	const BoundingBox& render_aabb,	// nerf aabb 
+	const mat3& render_aabb_to_local,
+	cudaStream_t stream
+) {
+	// Make sure we have enough memory reserved to render at the requested resolution
+	size_t n_rays = (size_t) numSamplesOrigin * numSamplesOrigin *  numSamplesPhi * numSamplesTheta;
+	enlarge(n_rays, padded_output_width, n_extra_dims, stream);
+
+	const dim3 threads = { 16, 8, 1 };
+
+	const dim3 blocks = { div_round_up((uint32_t)numSamplesOrigin * numSamplesTheta, threads.x), div_round_up((uint32_t)numSamplesOrigin * numSamplesPhi, threads.y), 1 };
+	
+	init_rays_from_multiple_center_with_payload_kernel_nerf<<<blocks, threads, 0, stream>>>(
+		numSamplesTheta,
+		numSamplesPhi,
+		numSamplesOrigin,
+		m_rays[0].payload,
+		render_aabb,
+		render_aabb_to_local
+	);
+
+	m_n_rays_initialized = numSamplesOrigin * numSamplesOrigin *  numSamplesPhi * numSamplesTheta;
+
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_rays[0].rgba, 0, m_n_rays_initialized * sizeof(vec4), stream));
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_rays[0].depth, 0, m_n_rays_initialized * sizeof(float), stream));
+}
+
+
 uint32_t Testbed::NerfTracer::trace(
 	const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
 	const BoundingBox& render_aabb,
@@ -1744,6 +2134,124 @@ uint32_t Testbed::NerfTracer::trace(
 			min_transmittance
 		);
 
+		i += n_steps_between_compaction;
+	}
+
+	uint32_t n_hit;
+	CUDA_CHECK_THROW(cudaMemcpyAsync(&n_hit, m_hit_counter, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+	CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+	return n_hit;
+}
+
+uint32_t Testbed::NerfTracer::trace_mesh(
+	const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
+	const BoundingBox& render_aabb,
+	const mat3& render_aabb_to_local,
+	const BoundingBox& train_aabb,
+	const vec2& focal_length,
+	float cone_angle_constant,
+	const uint8_t* grid,
+	ERenderMode render_mode,
+	const mat4x3 &camera_matrix,
+	float depth_scale,
+	int visualized_layer,
+	int visualized_dim,
+	ENerfActivation rgb_activation,
+	ENerfActivation density_activation,
+	int show_accel,
+	uint32_t max_mip,
+	float min_transmittance,
+	float glow_y_cutoff,
+	int glow_mode,
+	const float* extra_dims_gpu,
+	cudaStream_t stream
+) {
+	if (m_n_rays_initialized == 0) {
+		return 0;
+	}
+
+	CUDA_CHECK_THROW(cudaMemsetAsync(m_hit_counter, 0, sizeof(uint32_t), stream));
+
+	uint32_t n_alive = m_n_rays_initialized;
+
+	uint32_t i = 1;
+	uint32_t double_buffer_index = 0;
+	while (i < MARCH_ITER) {
+		RaysNerfSoa& rays_current = m_rays[(double_buffer_index + 1) % 2];
+		RaysNerfSoa& rays_tmp = m_rays[double_buffer_index % 2];
+		++double_buffer_index;
+		
+		// Compact rays that did not diverge yet
+		{
+			CUDA_CHECK_THROW(cudaMemsetAsync(m_alive_counter, 0, sizeof(uint32_t), stream));
+			linear_kernel(compact_kernel_nerf, 0, stream,
+				n_alive,
+				rays_tmp.rgba, rays_tmp.depth, rays_tmp.payload,
+				rays_current.rgba, rays_current.depth, rays_current.payload,
+				m_rays_hit.rgba, m_rays_hit.depth, m_rays_hit.payload,
+				m_alive_counter, m_hit_counter
+			);
+			CUDA_CHECK_THROW(cudaMemcpyAsync(&n_alive, m_alive_counter, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+		}
+		
+		if (n_alive == 0) {
+			break;
+		}
+		
+		// Want a large number of queries to saturate the GPU and to ensure compaction doesn't happen toooo frequently.
+		uint32_t target_n_queries = 2 * 1024 * 1024;
+		uint32_t n_steps_between_compaction = clamp(target_n_queries / n_alive, (uint32_t)MIN_STEPS_INBETWEEN_COMPACTION, (uint32_t)MAX_STEPS_INBETWEEN_COMPACTION);
+		
+		uint32_t extra_stride = network->n_extra_dims() * sizeof(float);
+		PitchedPtr<NerfCoordinate> input_data((NerfCoordinate*)m_network_input, 1, 0, extra_stride);
+		linear_kernel(generate_next_nerf_network_inputs_geometry, 0, stream,
+			n_alive,
+			render_aabb,
+			render_aabb_to_local,
+			train_aabb,
+			focal_length,
+			camera_matrix[2],
+			rays_current.payload,
+			input_data,
+			n_steps_between_compaction,
+			grid,
+			(show_accel>=0) ? show_accel : 0,
+			max_mip,
+			cone_angle_constant,
+			extra_dims_gpu
+		);
+		uint32_t n_elements = next_multiple(n_alive * n_steps_between_compaction, BATCH_SIZE_GRANULARITY);
+		GPUMatrix<float> positions_matrix((float*)m_network_input, (sizeof(NerfCoordinate) + extra_stride) / sizeof(float), n_elements);
+		GPUMatrix<network_precision_t, RM> rgbsigma_matrix((network_precision_t*)m_network_output, network->padded_output_width(), n_elements);
+		network->inference_mixed_precision(stream, positions_matrix, rgbsigma_matrix);
+		
+		
+		linear_kernel(composite_kernel_nerf, 0, stream,
+			n_alive,
+			n_elements,
+			i,
+			train_aabb,
+			glow_y_cutoff,
+			glow_mode,
+			camera_matrix,
+			focal_length,
+			depth_scale,
+			rays_current.rgba,
+			rays_current.depth,
+			rays_current.payload,
+			input_data,
+			m_network_output,
+			network->padded_output_width(),
+			n_steps_between_compaction,
+			render_mode,
+			grid,
+			rgb_activation,
+			density_activation,
+			show_accel,
+			min_transmittance
+		);
+		
 		i += n_steps_between_compaction;
 	}
 

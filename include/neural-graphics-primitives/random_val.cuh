@@ -45,7 +45,7 @@ inline __host__ __device__ vec2 random_val_2d(RNG& rng) {
 inline __host__ __device__ vec3 cylindrical_to_dir(const vec2& p) {
 	const float cos_theta = -2.0f * p.x + 1.0f;
 	const float phi = 2.0f * PI() * (p.y - 0.5f);
-
+	
 	const float sin_theta = sqrtf(fmaxf(1.0f - cos_theta * cos_theta, 0.0f));
 	float sin_phi, cos_phi;
 	sincosf(phi, &sin_phi, &cos_phi);
@@ -142,10 +142,55 @@ inline __host__ __device__ __device__ vec3 cosine_hemisphere(const vec2& u) {
 	return p;
 }
 
+inline __host__ __device__ __device__ vec3 warp_square_to_spherical_cap_uniform(const vec2& u, float cap_height) {
+	
+	float z = (1.0f - cap_height) * (1.0 - u.x) + u.x;
+	float r = sqrtf(fmaxf(0.0f, 1.0f - z*z));
+	float phi = 2.0f * PI() * u.y;
+	float x = r * cosf(phi);
+	float y = r * sinf(phi);
+
+	return vec3(x, y, z);
+	
+}
+
+inline __host__ __device__ __device__ float warp_square_to_spherical_cap_uniform_invpdf(vec3 result, float cap_height)
+{
+    return 2*PI() * cap_height;
+}
+
+inline __host__ __device__ __device__ float warp_square_to_spherical_cap_uniform_pdf(vec3 result, float cap_height)
+{
+    return 1/warp_square_to_spherical_cap_uniform_invpdf(result, cap_height);
+}
+
+inline __host__ __device__ __device__ mat3 compute_local_frame(const vec3& localZ) {
+	float x  = localZ.x;
+    float y  = localZ.y;
+    float z  = localZ.z;
+    float sz = (z >= 0) ? 1 : -1;
+    float a  = 1 / (sz + z);
+    float ya = y * a;
+    float b  = x * ya;
+    float c  = x * sz;
+
+    vec3 localX = vec3(c * x * a - 1, sz * b, c);
+    vec3 localY = vec3(b, y * ya - sz, y);
+
+    mat3 frame;
+    // Set columns of matrix
+    frame[0] = localX;
+    frame[1] = localY;
+    frame[2] = localZ;
+    return frame;
+}
+
+
 template <typename RNG>
 inline __host__ __device__ vec3 random_dir_cosine(RNG& rng) {
 	return cosine_hemisphere(random_val_2d(rng));
 }
+
 
 template <typename RNG>
 inline __host__ __device__ vec3 random_val_3d(RNG& rng) {

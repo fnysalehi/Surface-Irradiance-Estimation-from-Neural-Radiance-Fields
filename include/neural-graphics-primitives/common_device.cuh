@@ -389,7 +389,30 @@ inline NGP_HOST_DEVICE vec3 equirectangular_to_dir(const vec2& uv) {
 	sincosf(phi, &sp, &cp);
 	return {sp * st, ct, cp * st};
 }
+inline NGP_HOST_DEVICE Ray phitheta_to_ray(
+	const float theta,
+	const float phi,
+	const vec2& uv,
+	const ivec2& resolution,
+	const vec2& focal_length,
+	const mat4x3& camera_matrix,
+	const vec3& center,
+	const vec3& parallax_shift = vec3(0.0f),
+	float near_distance = 0.0f,
+	float focus_z = 1.0f,
+	float aperture_size = 0.0f,
+	const Foveation& foveation = {},
+	Buffer2DView<const uint8_t> hidden_area_mask = {},
+	const Lens& lens = {},
+	Buffer2DView<const vec2> distortion = {}
+) {
+		vec3 dir;
+		vec3 origin = center;
 
+		origin += dir * near_distance;
+		return {origin, dir};
+
+}
 inline NGP_HOST_DEVICE Ray uv_to_ray(
 	uint32_t spp,
 	const vec2& uv,

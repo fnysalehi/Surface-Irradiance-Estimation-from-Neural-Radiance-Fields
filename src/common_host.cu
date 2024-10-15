@@ -154,6 +154,7 @@ ETestbedMode mode_from_scene(const std::string& scene) {
 			tlog::info() << "setting the mode geometry";
 			return ETestbedMode::Geometry;
 		}
+		tlog::info() << "setting the mode Nerf";
 		return ETestbedMode::Nerf;
 	} else if (equals_case_insensitive(scene_path.extension(), "obj") || equals_case_insensitive(scene_path.extension(), "stl")) {
 		return ETestbedMode::Sdf;

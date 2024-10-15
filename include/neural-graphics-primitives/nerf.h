@@ -193,6 +193,13 @@ struct RaysNerfSoa {
 		CUDA_CHECK_THROW(cudaMemcpyAsync(depth, other.depth, size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
 		CUDA_CHECK_THROW(cudaMemcpyAsync(payload, other.payload, size * sizeof(NerfPayload), cudaMemcpyDeviceToDevice, stream));
 	}
+
+	// void copy_from_other_async_mesh_to_nerf(const RaysMeshSoa& other, cudaStream_t stream) {
+	// 	CUDA_CHECK_THROW(cudaMemcpyAsync(rgba, other.rgba, size * sizeof(vec4), cudaMemcpyDeviceToDevice, stream));
+	// 	CUDA_CHECK_THROW(cudaMemcpyAsync(depth, other.depth, size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+	// 	CUDA_CHECK_THROW(cudaMemcpyAsync(payload, other.payload, size * sizeof(NerfPayload), cudaMemcpyDeviceToDevice, stream));
+	// }
+	
 #endif
 
 	void set(vec4* rgba, float* depth, NerfPayload* payload, size_t size) {

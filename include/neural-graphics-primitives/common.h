@@ -58,6 +58,9 @@ static constexpr const char* GroundTruthRenderModeStr = "Shade\0Depth\0\0";
 enum class ERenderMode : int {
 	AO,
 	Shade,
+	ShadeNerf,
+	ShadeEnvMap,
+	ShadeGridEnvMap,
 	Normals,
 	Positions,
 	Depth,
@@ -151,6 +154,16 @@ enum class ESDFGroundTruthMode : int {
 	SDFBricks,
 };
 
+enum class Face : int {
+    Top,
+    Bottom,
+    Front,
+    Back ,
+    Right,
+    Left ,
+    NONE 
+};
+
 struct BRDFParams {
 	float metallic=0.f;
 	float subsurface=0.f;
@@ -162,7 +175,14 @@ struct BRDFParams {
 	vec3 basecolor = {0.8f, 0.8f, 0.8f};
 	vec3 ambientcolor = {0.0f, 0.0f, 0.0f};
 };
+
+
 struct DiscreteDistribution;
+
+struct ColorDirection {
+    vec3 color;
+    vec3 direction;
+};
 
 struct Ray {
 	vec3 o;

@@ -41,7 +41,7 @@ namespace optix_ptx {
 
 namespace ngp {
 
-constexpr float MAX_DIST = 10.0f;
+constexpr float MAX_DIST = 100.0f;
 
 #ifdef NGP_OPTIX
 OptixDeviceContext g_optix;

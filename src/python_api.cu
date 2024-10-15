@@ -284,6 +284,7 @@ PYBIND11_MODULE(pyngp, m) {
 	py::enum_<ERenderMode>(m, "RenderMode")
 		.value("AO", ERenderMode::AO)
 		.value("Shade", ERenderMode::Shade)
+		.value("Shade", ERenderMode::ShadeNerf)
 		.value("Normals", ERenderMode::Normals)
 		.value("Positions", ERenderMode::Positions)
 		.value("Depth", ERenderMode::Depth)

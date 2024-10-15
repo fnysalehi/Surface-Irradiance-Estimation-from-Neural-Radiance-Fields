@@ -160,7 +160,9 @@ void Testbed::reload_training_data() {
 void Testbed::clear_training_data() {
 	m_training_data_available = false;
 	m_nerf.training.dataset.metadata.clear();
+	m_geometry.nerf.training.dataset.metadata.clear();
 }
+
 
 void Testbed::set_mode(ETestbedMode mode) {
 	if (mode == m_testbed_mode) {
@@ -180,6 +182,7 @@ void Testbed::set_mode(ETestbedMode mode) {
 	m_loss = {};
 	m_network = {};
 	m_nerf_network = {};
+	m_geometry_nerf_network = {};
 	m_optimizer = {};
 	m_trainer = {};
 	m_envmap = {};
@@ -236,7 +239,6 @@ fs::path Testbed::find_network_config(const fs::path& network_config_path) {
 }
 
 json Testbed::load_network_config(std::istream& stream, bool is_compressed) {
-	tlog::info() << "Loading network config from stream. 239";
 	if (is_compressed) {
 		zstr::istream zstream{stream};
 		return json::from_msgpack(zstream);
@@ -245,7 +247,6 @@ json Testbed::load_network_config(std::istream& stream, bool is_compressed) {
 }
 
 json Testbed::load_network_config(const fs::path& network_config_path) {
-	tlog::info() << "Loading network config from: " << network_config_path;
 	bool is_snapshot = equals_case_insensitive(network_config_path.extension(), "msgpack") || equals_case_insensitive(network_config_path.extension(), "ingp");
 	if (network_config_path.empty() || !network_config_path.exists()) {
 		throw std::runtime_error{fmt::format("Network {} '{}' does not exist.", is_snapshot ? "snapshot" : "config", network_config_path.str())};
@@ -425,6 +426,10 @@ void Testbed::set_nerf_camera_matrix(const mat4x3& cam) {
 	m_camera = m_nerf.training.dataset.nerf_matrix_to_ngp(cam);
 }
 
+// void Testbed::set_geometry_nerf_camera_matrix(const mat4x3& cam) {
+// 	m_camera = m_geometry.nerf.training.dataset.nerf_matrix_to_ngp(cam);
+// }
+
 vec3 Testbed::look_at() const {
 	return view_pos() + view_dir() * m_scale;
 }
@@ -486,6 +491,49 @@ void Testbed::set_camera_to_training_view(int trainview) {
 
 	m_screen_center = vec2(1.0f) - m_nerf.training.dataset.metadata[trainview].principal_point;
 	m_nerf.training.view = trainview;
+
+	reset_accumulation(true);
+}
+
+void Testbed::first_training_view_geometry() {
+	m_geometry.nerf.training.view = 0;
+	set_camera_to_training_view(m_geometry.nerf.training.view);
+}
+
+void Testbed::last_training_view_geometry() {
+	m_geometry.nerf.training.view = m_geometry.nerf.training.dataset.n_images-1;
+	set_camera_to_training_view(m_geometry.nerf.training.view);
+}
+
+void Testbed::previous_training_view_geometry() {
+	if (m_geometry.nerf.training.view != 0) {
+		m_geometry.nerf.training.view -= 1;
+	}
+
+	set_camera_to_training_view_geometry(m_geometry.nerf.training.view);
+}
+
+void Testbed::next_training_view_geometry() {
+	if (m_geometry.nerf.training.view != m_geometry.nerf.training.dataset.n_images-1) {
+		m_geometry.nerf.training.view += 1;
+	}
+
+	set_camera_to_training_view_geometry(m_geometry.nerf.training.view);
+}
+
+void Testbed::set_camera_to_training_view_geometry(int trainview) {
+	auto old_look_at = look_at();
+	m_camera = m_smoothed_camera = get_xform_given_rolling_shutter(m_geometry.nerf.training.transforms[trainview], m_geometry.nerf.training.dataset.metadata[trainview].rolling_shutter, vec2{0.5f, 0.5f}, 0.0f);
+	m_relative_focal_length = m_geometry.nerf.training.dataset.metadata[trainview].focal_length / (float)m_geometry.nerf.training.dataset.metadata[trainview].resolution[m_fov_axis];
+	m_scale = std::max(dot(old_look_at - view_pos(), view_dir()), 0.1f);
+	m_geometry.nerf.render_with_lens_distortion = true;
+	m_geometry.nerf.render_lens = m_geometry.nerf.training.dataset.metadata[trainview].lens;
+	if (!supports_dlss(m_geometry.nerf.render_lens.mode)) {
+		m_dlss = false;
+	}
+
+	m_screen_center = vec2(1.0f) - m_geometry.nerf.training.dataset.metadata[trainview].principal_point;
+	m_geometry.nerf.training.view = trainview;
 
 	reset_accumulation(true);
 }
@@ -1906,6 +1954,7 @@ bool Testbed::keyboard_event() {
 	bool ctrl = ImGui::GetIO().KeyMods & ImGuiKeyModFlags_Ctrl;
 	bool shift = ImGui::GetIO().KeyMods & ImGuiKeyModFlags_Shift;
 
+	// maybe sth like this I can add to translate the meshes
 	if (ImGui::IsKeyPressed('Z')) {
 		m_camera_path.m_gizmo_op = ImGuizmo::TRANSLATE;
 	}
@@ -1924,6 +1973,7 @@ bool Testbed::keyboard_event() {
 			reset_camera();
 		} else {
 			if (ctrl) {
+				// or maybe I can add a function to reset the mesh or reload the meshes with new center!
 				reload_training_data();
 				// After reloading the training data, also reset the NN.
 				// Presumably, there is no use case where the user would
@@ -2020,7 +2070,7 @@ bool Testbed::keyboard_event() {
 			set_scale(m_scale / 1.1f);
 		}
 	}
-
+	// or I can add another parameter to the json file to set the translate_vec and I can update the cneter with a velocity * translate_vec
 	// WASD camera movement
 	vec3 translate_vec = vec3(0.0f);
 	if (ImGui::IsKeyDown('W')) {
@@ -2059,6 +2109,172 @@ bool Testbed::keyboard_event() {
 		// direction is _very_ jarring to the user, so make keyboard-based
 		// movement aligned with the VR view, even though it is not an intended
 		// movement mechanism. (Users should use controllers.)
+		// then add a translate_mesh function to the testbed
+		translate_camera(translate_vec, m_hmd && m_hmd->is_visible() ? mat3(m_views.front().camera0) : mat3(m_camera));
+	}
+
+	return false;
+}
+
+bool Testbed::update_meshes() {
+	
+
+	// maybe sth like this I can add to translate the meshes
+	if (ImGui::IsKeyPressed('Z')) {
+		m_camera_path.m_gizmo_op = ImGuizmo::TRANSLATE;
+	}
+
+	if (ImGui::IsKeyPressed('X')) {
+		m_camera_path.m_gizmo_op = ImGuizmo::ROTATE;
+	}
+
+	if (ImGui::IsKeyPressed('E')) {
+		set_exposure(m_exposure + (shift ? -0.5f : 0.5f));
+		redraw_next_frame();
+	}
+
+	if (ImGui::IsKeyPressed('R')) {
+		if (shift) {
+			reset_camera();
+		} else {
+			if (ctrl) {
+				// or maybe I can add a function to reset the mesh or reload the meshes with new center!
+				reload_training_data();
+				// After reloading the training data, also reset the NN.
+				// Presumably, there is no use case where the user would
+				// like to hot-reload the same training data set other than
+				// to slightly tweak its parameters. And to observe that
+				// effect meaningfully, the NN should be trained from scratch.
+			}
+
+			reload_network_from_file();
+		}
+	}
+
+	if (m_training_data_available) {
+		if (ImGui::IsKeyPressed('O')) {
+			m_nerf.training.render_error_overlay = !m_nerf.training.render_error_overlay;
+		}
+
+		if (ImGui::IsKeyPressed('G')) {
+			m_render_ground_truth = !m_render_ground_truth;
+			reset_accumulation();
+		}
+
+		if (ImGui::IsKeyPressed('T')) {
+			set_train(!m_train);
+		}
+	}
+
+	if (ImGui::IsKeyPressed('.')) {
+		if (m_single_view) {
+			if (m_visualized_dimension == network_width(m_visualized_layer)-1 && m_visualized_layer < network_num_forward_activations()-1) {
+				set_visualized_layer(std::max(0, std::min((int)network_num_forward_activations()-1, m_visualized_layer+1)));
+				set_visualized_dim(0);
+			} else {
+				set_visualized_dim(std::max(-1, std::min((int)network_width(m_visualized_layer)-1, m_visualized_dimension+1)));
+			}
+		} else {
+			set_visualized_layer(std::max(0, std::min((int)network_num_forward_activations()-1, m_visualized_layer+1)));
+		}
+	}
+
+	if (ImGui::IsKeyPressed(',')) {
+		if (m_single_view) {
+			if (m_visualized_dimension == 0 && m_visualized_layer > 0) {
+				set_visualized_layer(std::max(0, std::min((int)network_num_forward_activations()-1, m_visualized_layer-1)));
+				set_visualized_dim(network_width(m_visualized_layer)-1);
+			} else {
+				set_visualized_dim(std::max(-1, std::min((int)network_width(m_visualized_layer)-1, m_visualized_dimension-1)));
+			}
+		} else {
+			set_visualized_layer(std::max(0, std::min((int)network_num_forward_activations()-1, m_visualized_layer-1)));
+		}
+	}
+
+	if (ImGui::IsKeyPressed('M')) {
+		m_single_view = !m_single_view;
+		set_visualized_dim(-1);
+		reset_accumulation();
+	}
+
+
+	if (ImGui::IsKeyPressed('N')) {
+		m_sdf.analytic_normals = !m_sdf.analytic_normals;
+		reset_accumulation();
+	}
+
+	if (ImGui::IsKeyPressed('[')) {
+		if (shift) {
+			first_training_view();
+		} else {
+			previous_training_view();
+		}
+	}
+
+	if (ImGui::IsKeyPressed(']')) {
+		if (shift) {
+			last_training_view();
+		} else {
+			next_training_view();
+		}
+	}
+
+	if (ImGui::IsKeyPressed('=') || ImGui::IsKeyPressed('+')) {
+		if (m_fps_camera) {
+			m_camera_velocity *= 1.5f;
+		} else {
+			set_scale(m_scale * 1.1f);
+		}
+	}
+
+	if (ImGui::IsKeyPressed('-') || ImGui::IsKeyPressed('_')) {
+		if (m_fps_camera) {
+			m_camera_velocity /= 1.5f;
+		} else {
+			set_scale(m_scale / 1.1f);
+		}
+	}
+	// or I can add another parameter to the json file to set the translate_vec and I can update the cneter with a velocity * translate_vec
+	// WASD camera movement
+	vec3 translate_vec = vec3(0.0f);
+	if (ImGui::IsKeyDown('W')) {
+		translate_vec.z += 1.0f;
+	}
+
+	if (ImGui::IsKeyDown('A')) {
+		translate_vec.x += -1.0f;
+	}
+
+	if (ImGui::IsKeyDown('S')) {
+		translate_vec.z += -1.0f;
+	}
+
+	if (ImGui::IsKeyDown('D')) {
+		translate_vec.x += 1.0f;
+	}
+
+	if (ImGui::IsKeyDown(' ')) {
+		translate_vec.y += -1.0f;
+	}
+
+	if (ImGui::IsKeyDown('C')) {
+		translate_vec.y += 1.0f;
+	}
+
+	translate_vec *= m_camera_velocity * m_frame_ms.val() / 1000.0f;
+	if (shift) {
+		translate_vec *= 5.0f;
+	}
+
+	if (translate_vec != vec3(0.0f)) {
+		m_fps_camera = true;
+
+		// If VR is active, movement that isn't aligned with the current view
+		// direction is _very_ jarring to the user, so make keyboard-based
+		// movement aligned with the VR view, even though it is not an intended
+		// movement mechanism. (Users should use controllers.)
+		// then add a translate_mesh function to the testbed
 		translate_camera(translate_vec, m_hmd && m_hmd->is_visible() ? mat3(m_views.front().camera0) : mat3(m_camera));
 	}
 
@@ -2805,8 +3021,11 @@ void Testbed::train_and_render(bool skip_rendering) {
 		m_n_views = {(int)m_views.size(), 1};
 
 		m_nerf.render_with_lens_distortion = false;
+		m_geometry.nerf.render_with_lens_distortion = false;
+
 		reset_accumulation(true);
 	} else if (m_single_view) {
+		// tlog::info() << "Rendering single view";
 		set_n_views(1);
 		m_n_views = {1, 1};
 
@@ -2826,6 +3045,7 @@ void Testbed::train_and_render(bool skip_rendering) {
 		view.foveation = {};
 		view.device = &primary_device();
 	} else {
+		tlog::info() << "Rendering multiple views";
 		int n_views = n_dimensions_to_visualize()+1;
 
 		float d = std::sqrt((float)m_window_res.x * (float)m_window_res.y / (float)n_views);
@@ -2860,9 +3080,13 @@ void Testbed::train_and_render(bool skip_rendering) {
 	}
 
 	if (m_dlss) {
+		tlog::info() << "Rendering with DLSS";
 		m_aperture_size = 0.0f;
 		if (!supports_dlss(m_nerf.render_lens.mode)) {
 			m_nerf.render_with_lens_distortion = false;
+		}
+		else if (!supports_dlss(m_geometry.nerf.render_lens.mode)) {
+			m_geometry.nerf.render_with_lens_distortion = false;
 		}
 	}
 
@@ -2893,6 +3117,7 @@ void Testbed::train_and_render(bool skip_rendering) {
 		factor = clamp(factor, 1.0f / 16.0f, 1.0f);
 
 		for (auto&& view : m_views) {
+			// tlog::info() << "Rendering view with factor " << factor;
 			if (m_dlss) {
 				view.render_buffer->enable_dlss(*m_dlss_provider, view.full_resolution);
 			} else {
@@ -2919,7 +3144,7 @@ void Testbed::train_and_render(bool skip_rendering) {
 
 			if (m_foveated_rendering) {
 				if (m_dynamic_foveated_rendering) {
-            
+					tlog::info() << "Dynamic foveated rendering";
 					vec2 resolution_scale = vec2(render_res) / vec2(view.full_resolution);
 
 					// Only start foveation when DLSS if off or if DLSS is asked to do more than 1.5x upscaling.
@@ -3384,7 +3609,6 @@ bool Testbed::frame() {
 		begin_vr_frame_and_handle_vr_input();
 	}
 #endif
-
 	// Render against the trained neural network. If we're training and already close to convergence,
 	// we can skip rendering if the scene camera doesn't change
 	uint32_t n_to_skip = m_train ? clamp(m_training_step / 16u, 15u, 255u) : 0;
@@ -3426,10 +3650,6 @@ bool Testbed::frame() {
 	if (m_testbed_mode == ETestbedMode::Sdf && m_sdf.calculate_iou_online) {
 		m_sdf.iou = calculate_iou(m_train ? 64*64*64 : 128*128*128, m_sdf.iou_decay, false, true);
 		m_sdf.iou_decay = 0.f;
-	}
-	else if (m_testbed_mode == ETestbedMode::Geometry && m_geometry.mesh_cpu[0].sdf.calculate_iou_online) {
-		m_geometry.mesh_cpu[0].sdf.iou = calculate_iou(m_train ? 64*64*64 : 128*128*128, m_geometry.mesh_cpu[0].sdf.iou_decay, false, true);
-		m_geometry.mesh_cpu[0].sdf.iou_decay = 0.f;
 	}
 
 #ifdef NGP_GUI
@@ -3623,7 +3843,7 @@ Testbed::NetworkDims Testbed::network_dims() const {
 
 void Testbed::reset_network(bool clear_density_grid) {
 	m_sdf.iou_decay = 0;
-	m_geometry.mesh_cpu[0].sdf.iou_decay = 0;
+	// m_geometry.mesh_cpu[0].sdf.iou_decay = 0;
 
 	m_rng = default_rng_t{m_seed};
 
@@ -3646,8 +3866,28 @@ void Testbed::reset_network(bool clear_density_grid) {
 		m_nerf.density_grid.memset(0);
 		m_nerf.density_grid_bitfield.memset(0);
 
+		// set_all_devices_dirty();
+	}
+
+
+	m_geometry.nerf.training.counters_rgb.rays_per_batch = 1 << 12;
+	m_geometry.nerf.training.counters_rgb.measured_batch_size_before_compaction = 0;
+	m_geometry.nerf.training.n_steps_since_cam_update = 0;
+	m_geometry.nerf.training.n_steps_since_error_map_update = 0;
+	m_geometry.nerf.training.n_rays_since_error_map_update = 0;
+	m_geometry.nerf.training.n_steps_between_error_map_updates = 128;
+	m_geometry.nerf.training.error_map.is_cdf_valid = false;
+	m_geometry.nerf.training.density_grid_rng = default_rng_t{m_rng.next_uint()};
+
+	m_geometry.nerf.training.reset_camera_extrinsics();
+
+	if (clear_density_grid) {
+		m_geometry.nerf.density_grid.memset(0);
+		m_geometry.nerf.density_grid_bitfield.memset(0);
+
 		set_all_devices_dirty();
 	}
+
 
 	m_loss_graph_samples = 0;
 
@@ -3670,6 +3910,14 @@ void Testbed::reset_network(bool clear_density_grid) {
 
 	if (m_testbed_mode == ETestbedMode::Nerf) {
 		m_nerf.training.loss_type = string_to_loss_type(loss_config.value("otype", "L2"));
+
+		// Some of the Nerf-supported losses are not supported by Loss,
+		// so just create a dummy L2 loss there. The NeRF code path will bypass
+		// the Loss in any case.
+		loss_config["otype"] = "L2";
+	}
+	else if (m_testbed_mode == ETestbedMode::Geometry) {
+		m_geometry.nerf.training.loss_type = string_to_loss_type(loss_config.value("otype", "L2"));
 
 		// Some of the Nerf-supported losses are not supported by Loss,
 		// so just create a dummy L2 loss there. The NeRF code path will bypass
@@ -3712,6 +3960,10 @@ void Testbed::reset_network(bool clear_density_grid) {
 		if (m_per_level_scale <= 0.0f && m_n_levels > 1) {
 			m_per_level_scale = std::exp(std::log(desired_resolution * (float)m_nerf.training.dataset.aabb_scale / (float)m_base_grid_resolution) / (m_n_levels-1));
 			encoding_config["per_level_scale"] = m_per_level_scale;
+
+			m_per_level_scale = std::exp(std::log(desired_resolution * (float)m_geometry.nerf.training.dataset.aabb_scale / (float)m_base_grid_resolution) / (m_n_levels-1));
+			encoding_config["per_level_scale"] = m_per_level_scale;
+
 		}
 
 		tlog::info()
@@ -3793,109 +4045,143 @@ void Testbed::reset_network(bool clear_density_grid) {
 		}
 	} 
 	
-	else {
-
-		if(m_testbed_mode == ETestbedMode::Geometry)	{
-			
-			uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
-
-			if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
-				if (m_geometry.mesh_cpu[0].sdf.octree_depth_target == 0) {
-					m_geometry.mesh_cpu[0].sdf.octree_depth_target = encoding_config["n_levels"];
-				}
-
-				if (!m_geometry.mesh_cpu[0].sdf.triangle_octree || m_geometry.mesh_cpu[0].sdf.triangle_octree->depth() != m_geometry.mesh_cpu[0].sdf.octree_depth_target) {
-					m_geometry.mesh_cpu[0].sdf.triangle_octree.reset(new TriangleOctree{});
-					m_geometry.mesh_cpu[0].sdf.triangle_octree->build(*m_geometry.mesh_cpu[0].sdf.triangle_bvh, m_geometry.mesh_cpu[0].sdf.triangles_cpu, m_geometry.mesh_cpu[0].sdf.octree_depth_target);
-					m_geometry.mesh_cpu[0].sdf.octree_depth_target = m_geometry.mesh_cpu[0].sdf.triangle_octree->depth();
-					m_geometry.mesh_cpu[0].sdf.brick_data.free_memory();
-				}
-
-				m_encoding.reset(new TakikawaEncoding<network_precision_t>(
-					encoding_config["starting_level"],
-					m_geometry.mesh_cpu[0].sdf.triangle_octree,
-					string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
-				));
-
-				m_geometry.mesh_cpu[0].sdf.uses_takikawa_encoding = true;
-			} else {
-				m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
-
-				m_geometry.mesh_cpu[0].sdf.uses_takikawa_encoding = false;
-				if (m_geometry.mesh_cpu[0].sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
-					m_geometry.mesh_cpu[0].sdf.octree_depth_target = encoding_config["n_levels"];
-				}
+	else if(m_testbed_mode == ETestbedMode::Geometry)	{
+			//mesh
+		uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
+		if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
+			if (m_geometry.mesh_cpu[0].sdf.octree_depth_target == 0) {
+				m_geometry.mesh_cpu[0].sdf.octree_depth_target = encoding_config["n_levels"];
 			}
-
-			for (auto& device : m_devices) {
-				device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
+			if (!m_geometry.mesh_cpu[0].sdf.triangle_octree || m_geometry.mesh_cpu[0].sdf.triangle_octree->depth() != m_geometry.mesh_cpu[0].sdf.octree_depth_target) {
+				m_geometry.mesh_cpu[0].sdf.triangle_octree.reset(new TriangleOctree{});
+				m_geometry.mesh_cpu[0].sdf.triangle_octree->build(*m_geometry.mesh_cpu[0].sdf.triangle_bvh, m_geometry.mesh_cpu[0].sdf.triangles_cpu, m_geometry.mesh_cpu[0].sdf.octree_depth_target);
+				m_geometry.mesh_cpu[0].sdf.octree_depth_target = m_geometry.mesh_cpu[0].sdf.triangle_octree->depth();
+				m_geometry.mesh_cpu[0].sdf.brick_data.free_memory();
 			}
-
-			m_network = primary_device().network();
-
-			n_encoding_params = m_encoding->n_params();
-
-			tlog::info()
-				<< "Model:         " << dims.n_input
-				<< "--[" << std::string(encoding_config["otype"])
-				<< "]-->" << m_encoding->padded_output_width()
-				<< "--[" << std::string(network_config["otype"])
-				<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
-				<< "]-->" << dims.n_output
-				;
-
+			m_encoding.reset(new TakikawaEncoding<network_precision_t>(
+				encoding_config["starting_level"],
+				m_geometry.mesh_cpu[0].sdf.triangle_octree,
+				string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
+			));
+			m_geometry.mesh_cpu[0].sdf.uses_takikawa_encoding = true;
+		} else {
+			m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
+			m_geometry.mesh_cpu[0].sdf.uses_takikawa_encoding = false;
+			if (m_geometry.mesh_cpu[0].sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
+				m_geometry.mesh_cpu[0].sdf.octree_depth_target = encoding_config["n_levels"];
+			}
+		}
+		for (auto& device : m_devices) {
+			device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
+		}
+		m_network = primary_device().network();
+		n_encoding_params = m_encoding->n_params();
+		tlog::info()
+			<< "Model:         " << dims.n_input
+			<< "--[" << std::string(encoding_config["otype"])
+			<< "]-->" << m_encoding->padded_output_width()
+			<< "--[" << std::string(network_config["otype"])
+			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << dims.n_output
+			;
+		// nerf
+		m_geometry.nerf.training.cam_exposure.resize(m_geometry.nerf.training.dataset.n_images, AdamOptimizer<vec3>(1e-3f));
+		m_geometry.nerf.training.cam_pos_offset.resize(m_geometry.nerf.training.dataset.n_images, AdamOptimizer<vec3>(1e-4f));
+		m_geometry.nerf.training.cam_rot_offset.resize(m_geometry.nerf.training.dataset.n_images, RotationAdamOptimizer(1e-4f));
+		m_geometry.nerf.training.cam_focal_length_offset = AdamOptimizer<vec2>(1e-5f);
+		m_geometry.nerf.reset_extra_dims(m_rng);
+		json& dir_encoding_config = config["dir_encoding"];
+		json& rgb_network_config = config["rgb_network"];
+		uint32_t n_dir_dims = 3;
+		uint32_t n_extra_dims = m_geometry.nerf.training.dataset.n_extra_dims();
+		// Instantiate an additional model for each auxiliary GPU
+		for (auto& device : m_devices) {
+			device.set_geometry_nerf_network(std::make_shared<NerfNetwork<network_precision_t>>(
+				dims.n_pos,
+				n_dir_dims,
+				n_extra_dims,
+				dims.n_pos + 1, // The offset of 1 comes from the dt member variable of NerfCoordinate. HACKY
+				encoding_config,
+				dir_encoding_config,
+				network_config,
+				rgb_network_config
+			));
 		}
 		
-		else {
-
-			uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
-
-			if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
-				if (m_sdf.octree_depth_target == 0) {
-					m_sdf.octree_depth_target = encoding_config["n_levels"];
-				}
-
-				if (!m_sdf.triangle_octree || m_sdf.triangle_octree->depth() != m_sdf.octree_depth_target) {
-					m_sdf.triangle_octree.reset(new TriangleOctree{});
-					m_sdf.triangle_octree->build(*m_sdf.triangle_bvh, m_sdf.triangles_cpu, m_sdf.octree_depth_target);
-					m_sdf.octree_depth_target = m_sdf.triangle_octree->depth();
-					m_sdf.brick_data.free_memory();
-				}
-
-				m_encoding.reset(new TakikawaEncoding<network_precision_t>(
-					encoding_config["starting_level"],
-					m_sdf.triangle_octree,
-					string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
-				));
-
-				m_sdf.uses_takikawa_encoding = true;
-			} else {
-				m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
-
-				m_sdf.uses_takikawa_encoding = false;
-				if (m_sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
-					m_sdf.octree_depth_target = encoding_config["n_levels"];
-				}
+		m_network = m_geometry_nerf_network = primary_device().geometry_nerf_network();
+		// m_geometry_nerf_network = primary_device().geometry_nerf_network();
+		m_encoding = m_geometry_nerf_network->pos_encoding();
+		n_encoding_params = m_encoding->n_params() + m_geometry_nerf_network->dir_encoding()->n_params();
+		tlog::info()
+			<< "Density model: " << dims.n_pos
+			<< "--[" << std::string(encoding_config["otype"])
+			<< "]-->" << m_geometry_nerf_network->pos_encoding()->padded_output_width()
+			<< "--[" << std::string(network_config["otype"])
+			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << 1
+			;
+		tlog::info()
+			<< "Color model:   " << n_dir_dims
+			<< "--[" << std::string(dir_encoding_config["otype"])
+			<< "]-->" << m_geometry_nerf_network->dir_encoding()->padded_output_width() << "+" << network_config.value("n_output_dims", 16u)
+			<< "--[" << std::string(rgb_network_config["otype"])
+			<< "(neurons=" << (int)rgb_network_config["n_neurons"] << ",layers=" << ((int)rgb_network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << 3
+			;
+		// Create distortion map model
+		{
+			json& distortion_map_optimizer_config =  config.contains("distortion_map") && config["distortion_map"].contains("optimizer") ? config["distortion_map"]["optimizer"] : optimizer_config;
+			m_distortion.resolution = ivec2(32);
+			if (config.contains("distortion_map") && config["distortion_map"].contains("resolution")) {
+				from_json(config["distortion_map"]["resolution"], m_distortion.resolution);
 			}
-
-			for (auto& device : m_devices) {
-				device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
-			}
-
-			m_network = primary_device().network();
-
-			n_encoding_params = m_encoding->n_params();
-
-			tlog::info()
-				<< "Model:         " << dims.n_input
-				<< "--[" << std::string(encoding_config["otype"])
-				<< "]-->" << m_encoding->padded_output_width()
-				<< "--[" << std::string(network_config["otype"])
-				<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
-				<< "]-->" << dims.n_output
-				;
+			m_distortion.map = std::make_shared<TrainableBuffer<2, 2, float>>(m_distortion.resolution);
+			m_distortion.optimizer.reset(create_optimizer<float>(distortion_map_optimizer_config));
+			m_distortion.trainer = std::make_shared<Trainer<float, float>>(m_distortion.map, m_distortion.optimizer, std::shared_ptr<Loss<float>>{create_loss<float>(loss_config)}, m_seed);
 		}
 	}
+		
+		
+	else {
+		uint32_t alignment = network_config.contains("otype") && (equals_case_insensitive(network_config["otype"], "FullyFusedMLP") || equals_case_insensitive(network_config["otype"], "MegakernelMLP")) ? 16u : 8u;
+		if (encoding_config.contains("otype") && equals_case_insensitive(encoding_config["otype"], "Takikawa")) {
+			if (m_sdf.octree_depth_target == 0) {
+				m_sdf.octree_depth_target = encoding_config["n_levels"];
+			}
+			if (!m_sdf.triangle_octree || m_sdf.triangle_octree->depth() != m_sdf.octree_depth_target) {
+				m_sdf.triangle_octree.reset(new TriangleOctree{});
+				m_sdf.triangle_octree->build(*m_sdf.triangle_bvh, m_sdf.triangles_cpu, m_sdf.octree_depth_target);
+				m_sdf.octree_depth_target = m_sdf.triangle_octree->depth();
+				m_sdf.brick_data.free_memory();
+			}
+			m_encoding.reset(new TakikawaEncoding<network_precision_t>(
+				encoding_config["starting_level"],
+				m_sdf.triangle_octree,
+				string_to_interpolation_type(encoding_config.value("interpolation", "linear"))
+			));
+			m_sdf.uses_takikawa_encoding = true;
+		} else {
+			m_encoding.reset(create_encoding<network_precision_t>(dims.n_input, encoding_config));
+			m_sdf.uses_takikawa_encoding = false;
+			if (m_sdf.octree_depth_target == 0 && encoding_config.contains("n_levels")) {
+				m_sdf.octree_depth_target = encoding_config["n_levels"];
+			}
+		}
+		for (auto& device : m_devices) {
+			device.set_network(std::make_shared<NetworkWithInputEncoding<network_precision_t>>(m_encoding, dims.n_output, network_config));
+		}
+		m_network = primary_device().network();
+		n_encoding_params = m_encoding->n_params();
+		tlog::info()
+			<< "Model:         " << dims.n_input
+			<< "--[" << std::string(encoding_config["otype"])
+			<< "]-->" << m_encoding->padded_output_width()
+			<< "--[" << std::string(network_config["otype"])
+			<< "(neurons=" << (int)network_config["n_neurons"] << ",layers=" << ((int)network_config["n_hidden_layers"]+2) << ")"
+			<< "]-->" << dims.n_output
+			;
+	}
+	
 
 	size_t n_network_params = m_network->n_params() - n_encoding_params;
 
@@ -4091,6 +4377,7 @@ void Testbed::train(uint32_t batch_size) {
 	// If we don't have a trainer, as can happen when having loaded training data or changed modes without having
 	// explicitly loaded a new neural network.
 	if (!m_trainer) {
+		tlog::info() << "Creating neural network trainer.";
 		reload_network_from_file();
 		if (!m_trainer) {
 			throw std::runtime_error{"Unable to create a neural network trainer."};
@@ -4098,6 +4385,7 @@ void Testbed::train(uint32_t batch_size) {
 	}
 
 	if (m_testbed_mode == ETestbedMode::Nerf) {
+		tlog::info() << "Training NeRF.";
 		if (m_nerf.training.optimize_extra_dims) {
 			if (m_nerf.training.dataset.n_extra_learnable_dims == 0) {
 				m_nerf.training.dataset.n_extra_learnable_dims = 16;
@@ -4105,31 +4393,45 @@ void Testbed::train(uint32_t batch_size) {
 			}
 		}
 	}
+	else if (m_testbed_mode == ETestbedMode::Geometry) {
+		// tlog::info() << "Training Geometry.";
+		if (m_geometry.nerf.training.optimize_extra_dims) {
+			if (m_geometry.nerf.training.dataset.n_extra_learnable_dims == 0) {
+				m_geometry.nerf.training.dataset.n_extra_learnable_dims = 16;
+				reset_network();
+			}
+		}
+	}
 
 	if (!m_dlss) {
 		// No immediate redraw necessary
+		// tlog::info() << "Training DLSS.";
 		reset_accumulation(false, false);
 	}
-
+	// tlog::info() << "Trained DLSS.";
 	uint32_t n_prep_to_skip = m_testbed_mode == ETestbedMode::Nerf ? clamp(m_training_step / 16u, 1u, 16u) : 1u;
+	n_prep_to_skip = m_testbed_mode == ETestbedMode::Geometry ? clamp(m_training_step / 16u, 1u, 16u) : n_prep_to_skip;
 	if (m_training_step % n_prep_to_skip == 0) {
+		// tlog::info() << "Preparing training data.";
 		auto start = std::chrono::steady_clock::now();
 		ScopeGuard timing_guard{[&]() {
 			m_training_prep_ms.update(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-start).count() / n_prep_to_skip);
 		}};
 
 		switch (m_testbed_mode) {
-			case ETestbedMode::Nerf: training_prep_nerf(batch_size, m_stream.get()); break;
-			case ETestbedMode::Sdf: training_prep_sdf(batch_size, m_stream.get()); break;
-			case ETestbedMode::Image: training_prep_image(batch_size, m_stream.get()); break;
-			case ETestbedMode::Volume: training_prep_volume(batch_size, m_stream.get()); break;
-			case ETestbedMode::Geometry: training_prep_geometry(batch_size, m_stream.get()); break;
+			case ETestbedMode::Nerf: 		training_prep_nerf(batch_size, m_stream.get()); break;
+			case ETestbedMode::Sdf: 		training_prep_sdf(batch_size, m_stream.get()); break;
+			case ETestbedMode::Image: 		training_prep_image(batch_size, m_stream.get()); break;
+			case ETestbedMode::Volume: 		training_prep_volume(batch_size, m_stream.get()); break;
+			case ETestbedMode::Geometry:	
+											// training_prep_geometry(batch_size, m_stream.get()); 
+											// training_prep_nerf_geometry(batch_size, m_stream.get()); 
+											break;
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
 
 		CUDA_CHECK_THROW(cudaStreamSynchronize(m_stream.get()));
 	}
-
 	// Find leaf optimizer and update its settings
 	json* leaf_optimizer_config = &m_network_config["optimizer"];
 	while (leaf_optimizer_config->contains("nested")) {
@@ -4138,28 +4440,33 @@ void Testbed::train(uint32_t batch_size) {
 	(*leaf_optimizer_config)["optimize_matrix_params"] = m_train_network;
 	(*leaf_optimizer_config)["optimize_non_matrix_params"] = m_train_encoding;
 	m_optimizer->update_hyperparams(m_network_config["optimizer"]);
-
+	
 	bool get_loss_scalar = m_training_step % 16 == 0;
-
+	
+	// tlog::info() << "Training data prepared.";
 	{
 		auto start = std::chrono::steady_clock::now();
 		ScopeGuard timing_guard{[&]() {
 			m_training_ms.update(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now()-start).count());
 		}};
-
+		// tlog::info() << "Before training neural network.";
 		switch (m_testbed_mode) {
 			case ETestbedMode::Nerf: train_nerf(batch_size, get_loss_scalar, m_stream.get()); break;
 			case ETestbedMode::Sdf: train_sdf(batch_size, get_loss_scalar, m_stream.get()); break;
 			case ETestbedMode::Image: train_image(batch_size, get_loss_scalar, m_stream.get()); break;
 			case ETestbedMode::Volume: train_volume(batch_size, get_loss_scalar, m_stream.get()); break;
-			case ETestbedMode::Geometry: train_sdf_geometry(batch_size, get_loss_scalar, m_stream.get()); break;
+			case ETestbedMode::Geometry: 
+			// train_sdf_geometry(batch_size, get_loss_scalar, m_stream.get()); 
+			// train_nerf_geometry(batch_size, get_loss_scalar, m_stream.get()); 
+			break;
 			default: throw std::runtime_error{"Invalid training mode."};
 		}
-
+		// tlog::info() << "After training neural network.";
 		CUDA_CHECK_THROW(cudaStreamSynchronize(m_stream.get()));
 	}
 
 	if (get_loss_scalar) {
+		// tlog::info() << "Getting loss scalar.";
 		update_loss_graph();
 	}
 }
@@ -4526,42 +4833,8 @@ void Testbed::render_frame_main(
 			case ETestbedMode::Geometry:
 			{
 
-				// distance_fun_t distance_fun = [&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
-    			// 	m_geometry.geometry_mesh_bvh->signed_distance_gpu_mesh(
-    			// 	    n_elements,
-    			// 	    m_sdf.mesh_sdf_mode,
-    			// 	    positions,
-    			// 	    distances,
-    			// 	    m_geometry.mesh_cpu.data(),
-    			// 	    false,
-    			// 	    stream
-    			// 	);
-				// };
-				
-				// Todo: this should not be empty!
-				// normals_fun_t normals_fun = [](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
-    			// 	// NO-OP. Normals will automatically be populated by raytrace
-				// };
-				// // tlog::info() << "about ot render geometry mesh";
-				// render_geometry_mesh(
-				// 	device.stream(),
-				// 	normals_fun,
-				// 	device.render_buffer_view(),
-				// 	focal_length,
-				// 	camera_matrix0,
-				// 	screen_center,
-				// 	foveation,
-				// 	visualized_dimension
-				// );
-
-
-
-
-				distance_fun_t distance_fun =
-					m_render_ground_truth ? (distance_fun_t)[&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
-						if (m_geometry.mesh_cpu[0].sdf.groundtruth_mode == ESDFGroundTruthMode::SDFBricks) {
-						} else {
-							m_geometry.mesh_cpu[0].sdf.triangle_bvh->signed_distance_gpu(
+				distance_fun_t distance_fun =(distance_fun_t)[&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
+						m_geometry.mesh_cpu[0].sdf.triangle_bvh->signed_distance_gpu(
 								n_elements,
 								m_geometry.mesh_cpu[0].sdf.mesh_sdf_mode,
 								positions,
@@ -4570,22 +4843,10 @@ void Testbed::render_frame_main(
 								false,
 								stream
 							);
-						}
-					} : (distance_fun_t)[&](uint32_t n_elements, const vec3* positions, float* distances, cudaStream_t stream) {
-						n_elements = next_multiple(n_elements, BATCH_SIZE_GRANULARITY);
-						GPUMatrix<float> positions_matrix((float*)positions, 3, n_elements);
-						GPUMatrix<float, RM> distances_matrix(distances, 1, n_elements);
-						m_network->inference(stream, positions_matrix, distances_matrix);
-					};
+						};
 
-				normals_fun_t normals_fun =
-					m_render_ground_truth ? (normals_fun_t)[&](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
+				normals_fun_t normals_fun = (normals_fun_t)[&](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
 						// NO-OP. Normals will automatically be populated by raytrace
-					} : (normals_fun_t)[&](uint32_t n_elements, const vec3* positions, vec3* normals, cudaStream_t stream) {
-						n_elements = next_multiple(n_elements, BATCH_SIZE_GRANULARITY);
-						GPUMatrix<float> positions_matrix((float*)positions, 3, n_elements);
-						GPUMatrix<float> normals_matrix((float*)normals, 3, n_elements);
-						m_network->input_gradient(stream, 0, positions_matrix, normals_matrix);
 					};
 
 				render_geometry_mesh(
@@ -4597,9 +4858,30 @@ void Testbed::render_frame_main(
 					camera_matrix0,
 					screen_center,
 					foveation,
-					visualized_dimension
-				);
+					visualized_dimension,
 
+					device, 
+					device.geometry_nerf_network(),
+					device.data().density_grid_bitfield_ptr,
+					camera_matrix1,
+					nerf_rolling_shutter
+				);
+				
+				if (!m_render_ground_truth || m_ground_truth_alpha < 1.0f) {
+					render_geometry_nerf(
+						device.stream(), 
+						device, 
+						device.render_buffer_view(), 
+						device.geometry_nerf_network(), 
+						device.data().density_grid_bitfield_ptr, 
+						focal_length, 
+						camera_matrix0, 
+						camera_matrix1, 
+						nerf_rolling_shutter, 
+						screen_center, 
+						foveation, 
+						visualized_dimension);
+				}
 
 				// render_geometry_nerf(device.stream(), device, device.render_buffer_view(), device.nerf_network(), device.data().density_grid_bitfield_ptr, focal_length, camera_matrix0, camera_matrix1, nerf_rolling_shutter, screen_center, foveation, visualized_dimension);
 			
@@ -4622,6 +4904,7 @@ void Testbed::render_frame_epilogue(
 	CudaRenderBuffer& render_buffer,
 	bool to_srgb
 ) {
+	// tlog::info() << "Rendering frame epilogue.";
 	vec2 focal_length = calc_focal_length(render_buffer.in_resolution(), relative_focal_length, m_fov_axis, m_zoom);
 	vec2 screen_center = render_screen_center(orig_screen_center);
 
@@ -4629,6 +4912,7 @@ void Testbed::render_frame_epilogue(
 	render_buffer.set_tonemap_curve(m_tonemap_curve);
 
 	Lens lens = (m_testbed_mode == ETestbedMode::Nerf && m_nerf.render_with_lens_distortion) ? m_nerf.render_lens : Lens{};
+	lens = (m_testbed_mode == ETestbedMode::Geometry && m_geometry.nerf.render_with_lens_distortion) ? m_geometry.nerf.render_lens : lens;
 
 	// Prepare DLSS data: motion vectors, scaled depth, exposure
 	if (render_buffer.dlss()) {
@@ -4744,10 +5028,69 @@ void Testbed::render_frame_epilogue(
 			render_buffer.overlay_false_color(metadata.resolution, to_srgb, m_fov_axis, stream, err_data, error_map_res, average_error.data(), m_nerf.training.error_overlay_brightness, m_render_ground_truth);
 		}
 	}
+	else if (m_testbed_mode == ETestbedMode::Geometry) {
+		// tlog::info() << "Rendering geometry epilogue for geometry mode.";
+		// Overlay the ground truth image if requested
+		if (m_render_ground_truth) {
+			tlog::info() << "Rendering ground truth image for geometry mode.";
+			auto const& metadata = m_geometry.nerf.training.dataset.metadata[m_geometry.nerf.training.view];
+			if (m_ground_truth_render_mode == EGroundTruthRenderMode::Shade) {
+				render_buffer.overlay_image(
+					m_ground_truth_alpha,
+					vec3(m_exposure) + m_geometry.nerf.training.cam_exposure[m_geometry.nerf.training.view].variable(),
+					m_background_color,
+					output_color_space,
+					metadata.pixels,
+					metadata.image_data_type,
+					metadata.resolution,
+					m_fov_axis,
+					m_zoom,
+					vec2(0.5f),
+					stream
+				);
+			} else if (m_ground_truth_render_mode == EGroundTruthRenderMode::Depth && metadata.depth) {
+				tlog::info() << "Rendering ground truth depth for geometry mode.";
+				render_buffer.overlay_depth(
+					m_ground_truth_alpha,
+					metadata.depth,
+					1.0f/m_geometry.nerf.training.dataset.scale,
+					metadata.resolution,
+					m_fov_axis,
+					m_zoom,
+					vec2(0.5f),
+					stream
+				);
+			}
+		}
+
+		// Visualize the accumulated error map if requested
+		if (m_geometry.nerf.training.render_error_overlay) {
+			tlog::info() << "Rendering error overlay for geometry mode.";
+			const float* err_data = m_geometry.nerf.training.error_map.data.data();
+			ivec2 error_map_res = m_geometry.nerf.training.error_map.resolution;
+			if (m_render_ground_truth) {
+				err_data = m_geometry.nerf.training.dataset.sharpness_data.data();
+				error_map_res = m_geometry.nerf.training.dataset.sharpness_resolution;
+			}
+			size_t emap_size = error_map_res.x * error_map_res.y;
+			err_data += emap_size * m_geometry.nerf.training.view;
+
+			GPUMemory<float> average_error;
+			average_error.enlarge(1);
+			average_error.memset(0);
+			const float* aligned_err_data_s = (const float*)(((size_t)err_data)&~15);
+			const float* aligned_err_data_e = (const float*)(((size_t)(err_data+emap_size))&~15);
+			size_t reduce_size = aligned_err_data_e - aligned_err_data_s;
+			reduce_sum(aligned_err_data_s, [reduce_size] __device__ (float val) { return max(val,0.f) / (reduce_size); }, average_error.data(), reduce_size, stream);
+			auto const &metadata = m_geometry.nerf.training.dataset.metadata[m_geometry.nerf.training.view];
+			render_buffer.overlay_false_color(metadata.resolution, to_srgb, m_fov_axis, stream, err_data, error_map_res, average_error.data(), m_geometry.nerf.training.error_overlay_brightness, m_render_ground_truth);
+		}
+	}
 
 #ifdef NGP_GUI
 	// If in VR, indicate the hand position and render transparent background
 	if (m_hmd && m_vr_frame_info) {
+		tlog::info() << "Rendering VR overlay.";
 		auto& hands = m_vr_frame_info->hands;
 
 		auto res = render_buffer.out_resolution();
@@ -4945,17 +5288,27 @@ void Testbed::load_snapshot(nlohmann::json config) {
 		throw std::runtime_error{"Snapshot uses an old format and can not be loaded."};
 	}
 
-	if (snapshot.contains("mode")) {
-		set_mode(mode_from_string(snapshot["mode"]));
-	} else if (snapshot.contains("nerf")) {
-		// To be able to load old NeRF snapshots that don't specify their mode yet
-		set_mode(ETestbedMode::Nerf);
-	} else if (m_testbed_mode == ETestbedMode::None) {
-		throw std::runtime_error{"Unknown snapshot mode. Snapshot must be regenerated with a new version of instant-ngp."};
+	if(m_testbed_mode != ETestbedMode::Geometry) {
+		if (snapshot.contains("mode")) {
+			tlog::info() << "Loading snapshot with mode: " << snapshot["mode"];
+			set_mode(mode_from_string(snapshot["mode"]));
+		} else if (snapshot.contains("nerf")) {
+			// To be able to load old NeRF snapshots that don't specify their mode yet
+			set_mode(ETestbedMode::Nerf);
+		} else if (m_testbed_mode == ETestbedMode::None) {
+			throw std::runtime_error{"Unknown snapshot mode. Snapshot must be regenerated with a new version of instant-ngp."};
+		}
 	}
 
-	m_aabb = snapshot.value("aabb", m_aabb);
-	m_bounding_radius = snapshot.value("bounding_radius", m_bounding_radius);
+	if(m_testbed_mode == ETestbedMode::Geometry) 
+	{
+		m_geometry.nerfBoundingBox = BoundingBox(vec3(0.0f), vec3(1.0f));
+		m_bounding_radius = length(vec3(1.0f));
+	}
+	else {
+		m_aabb = snapshot.value("aabb", m_aabb);
+		m_bounding_radius = snapshot.value("bounding_radius", m_bounding_radius);
+	}
 
 	if (m_testbed_mode == ETestbedMode::Nerf) {
 		if (snapshot["density_grid_size"] != NERF_GRIDSIZE()) {
@@ -4993,6 +5346,47 @@ void Testbed::load_snapshot(nlohmann::json config) {
 		if (m_nerf.density_grid.size() == NERF_GRID_N_CELLS() * (m_nerf.max_cascade + 1)) {
 			update_density_grid_mean_and_bitfield(nullptr);
 		} else if (m_nerf.density_grid.size() != 0) {
+			// A size of 0 indicates that the density grid was never populated, which is a valid state of a (yet) untrained model.
+			throw std::runtime_error{"Incompatible number of grid cascades."};
+		}
+	}
+	else if (m_testbed_mode == ETestbedMode::Geometry) {
+		if (snapshot["density_grid_size"] != NERF_GRIDSIZE()) {
+			throw std::runtime_error{"Incompatible grid size."};
+		}
+
+		m_geometry.nerf.training.counters_rgb.rays_per_batch = snapshot["nerf"]["rgb"]["rays_per_batch"];
+		m_geometry.nerf.training.counters_rgb.measured_batch_size = snapshot["nerf"]["rgb"]["measured_batch_size"];
+		m_geometry.nerf.training.counters_rgb.measured_batch_size_before_compaction = snapshot["nerf"]["rgb"]["measured_batch_size_before_compaction"];
+
+		// If we haven't got a nerf dataset loaded, load dataset metadata from the snapshot
+		// and render using just that.
+		// if (m_data_path.empty() && snapshot["nerf"].contains("dataset")) {
+		// 	m_geometry.nerf.training.dataset = snapshot["nerf"]["dataset"];
+		// 	load_nerf(m_data_path);
+		// } else 
+		{
+			if (snapshot["nerf"].contains("aabb_scale")) {
+				m_geometry.nerf.training.dataset.aabb_scale = snapshot["nerf"]["aabb_scale"];
+			}
+
+			if (snapshot["nerf"].contains("dataset")) {
+				m_geometry.nerf.training.dataset.n_extra_learnable_dims = snapshot["nerf"]["dataset"].value("n_extra_learnable_dims", m_geometry.nerf.training.dataset.n_extra_learnable_dims);
+			}
+		}
+
+		load_nerf_post(vec3(0.0f));
+
+		GPUMemory<__half> density_grid_fp16 = snapshot["density_grid_binary"];
+		m_geometry.nerf.density_grid.resize(density_grid_fp16.size());
+
+		parallel_for_gpu(density_grid_fp16.size(), [density_grid=m_geometry.nerf.density_grid.data(), density_grid_fp16=density_grid_fp16.data()] __device__ (size_t i) {
+			density_grid[i] = (float)density_grid_fp16[i];
+		});
+
+		if (m_geometry.nerf.density_grid.size() == NERF_GRID_N_CELLS() * (m_geometry.nerf.max_cascade + 1)) {
+			update_density_grid_mean_and_bitfield_geometry(nullptr);
+		} else if (m_geometry.nerf.density_grid.size() != 0) {
 			// A size of 0 indicates that the density grid was never populated, which is a valid state of a (yet) untrained model.
 			throw std::runtime_error{"Incompatible number of grid cascades."};
 		}
@@ -5049,6 +5443,19 @@ void Testbed::load_snapshot(nlohmann::json config) {
 			if (snapshot["nerf"].contains("extra_dims_opt")) m_nerf.training.extra_dims_opt = snapshot["nerf"].at("extra_dims_opt").get<std::vector<VarAdamOptimizer>>();
 			m_nerf.training.update_transforms();
 			m_nerf.training.update_extra_dims();
+		}
+	}
+	else if (m_testbed_mode == ETestbedMode::Geometry) {
+		// If the snapshot appears to come from the same dataset as was already present
+		// (or none was previously present, in which case it came from the snapshot
+		// in the first place), load dataset-specific optimized quantities, such as
+		// extrinsics, exposure, latents.
+		if (snapshot["nerf"].contains("dataset") && m_geometry.nerf.training.dataset.is_same(snapshot["nerf"]["dataset"])) {
+			if (snapshot["nerf"].contains("cam_pos_offset")) m_geometry.nerf.training.cam_pos_offset = snapshot["nerf"].at("cam_pos_offset").get<std::vector<AdamOptimizer<vec3>>>();
+			if (snapshot["nerf"].contains("cam_rot_offset")) m_geometry.nerf.training.cam_rot_offset = snapshot["nerf"].at("cam_rot_offset").get<std::vector<RotationAdamOptimizer>>();
+			if (snapshot["nerf"].contains("extra_dims_opt")) m_geometry.nerf.training.extra_dims_opt = snapshot["nerf"].at("extra_dims_opt").get<std::vector<VarAdamOptimizer>>();
+			m_geometry.nerf.training.update_transforms();
+			m_geometry.nerf.training.update_extra_dims();
 		}
 	}
 
@@ -5108,13 +5515,18 @@ void Testbed::CudaDevice::set_nerf_network(const std::shared_ptr<NerfNetwork<net
 	set_network(nerf_network);
 }
 
+void Testbed::CudaDevice::set_geometry_nerf_network(const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network) {
+	m_geometry_nerf_network = nerf_network;
+	set_network(nerf_network);
+}
+
 void Testbed::sync_device(CudaRenderBuffer& render_buffer, Testbed::CudaDevice& device) {
 	if (!device.dirty()) {
 		return;
 	}
 
 	if (device.is_primary()) {
-		device.data().density_grid_bitfield_ptr = m_nerf.density_grid_bitfield.data();
+		device.data().density_grid_bitfield_ptr = m_geometry.nerf.density_grid_bitfield.data();
 		device.data().hidden_area_mask = render_buffer.hidden_area_mask();
 		device.set_dirty(false);
 		return;
@@ -5125,9 +5537,9 @@ void Testbed::sync_device(CudaRenderBuffer& render_buffer, Testbed::CudaDevice& 
 	int active_device = cuda_device();
 	auto guard = device.device_guard();
 
-	device.data().density_grid_bitfield.resize(m_nerf.density_grid_bitfield.size());
-	if (m_nerf.density_grid_bitfield.size() > 0) {
-		CUDA_CHECK_THROW(cudaMemcpyPeerAsync(device.data().density_grid_bitfield.data(), device.id(), m_nerf.density_grid_bitfield.data(), active_device, m_nerf.density_grid_bitfield.bytes(), device.stream()));
+	device.data().density_grid_bitfield.resize(m_geometry.nerf.density_grid_bitfield.size());
+	if (m_geometry.nerf.density_grid_bitfield.size() > 0) {
+		CUDA_CHECK_THROW(cudaMemcpyPeerAsync(device.data().density_grid_bitfield.data(), device.id(), m_geometry.nerf.density_grid_bitfield.data(), active_device, m_geometry.nerf.density_grid_bitfield.bytes(), device.stream()));
 	}
 
 	device.data().density_grid_bitfield_ptr = device.data().density_grid_bitfield.data();

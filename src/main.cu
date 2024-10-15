@@ -151,10 +151,12 @@ int main_func(const std::vector<std::string>& arguments) {
 	Testbed testbed;
 
 	for (auto file : get(files)) {
+		tlog::info() << "Loading file " << file;
 		testbed.load_file(file);
 	}
 
 	if (scene_flag) {
+		tlog::info() << "Loading training data " << get(scene_flag);
 		testbed.load_training_data(get(scene_flag));
 	}
 
@@ -179,8 +181,14 @@ int main_func(const std::vector<std::string>& arguments) {
 	if (vr_flag) {
 		testbed.init_vr();
 	}
-
+	// pre computation of envmap
+	if(testbed.m_render_mode == ERenderMode::ShadeEnvMap)
+		testbed.computeEnvmapMultipleMain();
+	else if(testbed.m_render_mode == ERenderMode::ShadeGridEnvMap)
+		testbed.computeEnvmapGrid();
+	
 	// Render/training loop
+	// if I wanna change the position of the meshes it should be done inside the loop
 	while (testbed.frame()) {
 		if (!gui) {
 			tlog::info() << "iteration=" << testbed.m_training_step << " loss=" << testbed.m_loss_scalar.val();

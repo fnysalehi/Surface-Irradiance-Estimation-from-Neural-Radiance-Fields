@@ -40,7 +40,6 @@ public:
 	virtual void signed_distance_gpu_mesh(uint32_t n_elements, EMeshSdfMode mode, const vec3* gpu_positions, float* gpu_distances, const MeshData* __restrict__ meshes, bool use_existing_distances_as_upper_bounds, cudaStream_t stream) = 0;
 	virtual void ray_trace_gpu(uint32_t n_elements, vec3* gpu_positions, vec3* gpu_directions, const MeshData* __restrict__ meshes, const Nerf* __restrict__ nerfs, cudaStream_t stream) = 0;
 	virtual void ray_trace_mesh_gpu(uint32_t n_elements, vec3* gpu_positions, vec3* gpu_directions, const MeshData* __restrict__ meshes, cudaStream_t stream) = 0;
-	virtual void ray_trace_nerf_gpu(uint32_t n_elements, vec3* gpu_positions, vec3* gpu_directions, const Nerf* __restrict__ nerfs, cudaStream_t stream) = 0;
 	virtual void build_mesh(std::vector<MeshData>& meshes, uint32_t n_primitives_per_leaf) = 0;
 	virtual void build_nerf(std::vector<Nerf>& nerfs, uint32_t n_primitives_per_leaf) = 0;
 	virtual void build_optix(const GPUMemory<GeometryBvhNode>& nodes, cudaStream_t stream) = 0;
@@ -88,11 +87,7 @@ protected:
 	std::vector<GeometryBvhNode> m_nodes;
 	GPUMemory<GeometryBvhNode> m_nodes_gpu;
 	
-
-	
 	GeometryBvh(){}
-
-
 
 	BvhType m_nodes_type;
 };

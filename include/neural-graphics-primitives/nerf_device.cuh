@@ -492,6 +492,46 @@ NGP_HOST_DEVICE float if_unoccupied_advance_to_next_occupied_voxel(
 		t = advance_to_next_voxel(t, cone_angle, pos, ray.d, idir, mip);
 	}
 }
+// return 0.0f;
+
+template <bool MIP_FROM_DT=false>
+NGP_HOST_DEVICE float if_unoccupied_advance_to_next_occupied_voxel_geometry(
+	float t,
+	float cone_angle,
+	const Ray& ray,
+	const vec3& idir,
+	const uint8_t* __restrict__ density_grid,
+	uint32_t min_mip,
+	uint32_t max_mip,
+	BoundingBox aabb,
+	mat3 aabb_to_local = mat3::identity()
+) {
+	// while (true) {
+	uint32_t i = 1;
+	uint32_t max_iter = 200;
+	while( i< max_iter) { 
+		vec3 pos = ray(t);
+		if (t >= MAX_DEPTH()  || !aabb.contains(aabb_to_local * pos)) {
+			return MAX_DEPTH();
+		}
+		uint32_t mip = clamp(MIP_FROM_DT ? mip_from_dt(calc_dt(t, cone_angle), pos) : mip_from_pos(pos), min_mip, max_mip);
+		
+		if (!density_grid || density_grid_occupied_at(pos, density_grid, mip)) {
+			return t;
+		}
+		
+		// Find largest empty voxel surrounding us, such that we can advance as far as possible in the next step.
+		// Other places that do voxel stepping don't need this, because they don't rely on thread coherence as
+		// much as this one here.
+		while (mip < max_mip && !density_grid_occupied_at(pos, density_grid, mip+1)) {
+			++mip;
+		}
+		
+		t = advance_to_next_voxel(t, cone_angle, pos, ray.d, idir, mip);
+		++i;
+	}
+	return MAX_DEPTH();
+}
 
 static constexpr float UNIFORM_SAMPLING_FRACTION = 0.5f;
 

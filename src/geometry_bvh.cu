@@ -53,7 +53,7 @@ __global__ void signed_distance_raystab_kernel_geometry(uint32_t n_elements, con
 __global__ void unsigned_distance_kernel_geometry(uint32_t n_elements, const vec3* __restrict__ positions, const MeshData* __restrict__ meshes, float* __restrict__ distances, bool use_existing_distances_as_upper_bounds = false);
 
 __global__ void mesh_raytrace_kernel(uint32_t n_elements, vec3* __restrict__ positions, vec3* __restrict__ directions, const GeometryBvhNode* __restrict__ nodes, const TriangleBvhNode** __restrict__ bvhnodes, const Triangle** __restrict__ triangles, const MeshData* __restrict__ meshes);		
-__global__ void nerf_raytrace_kernel(uint32_t n_elements, vec3* __restrict__ positions, vec3* __restrict__ directions, const GeometryBvhNode* __restrict__ nodes, const Nerf* __restrict__ nerfs);
+// __global__ void nerf_raytrace_kernel(uint32_t n_elements, vec3* __restrict__ positions, vec3* __restrict__ directions, const GeometryBvhNode* __restrict__ nodes, const Nerf* __restrict__ nerfs);
 template <uint32_t BRANCHING_FACTOR>
 class GeometryBvhWithBranchingFactor : public GeometryBvh {
 public:
@@ -162,202 +162,42 @@ public:
 		return {shortest_idx, mint};
 	}
 
-	// __host__ __device__ static std::pair<int,  float> ray_intersect(const vec3& ro, const vec3& rd, const GeometryBvhNode* __restrict__ meshbvhnodes, const MeshData* __restrict__ meshes) {
-	// 	FixedIntStack query_stack;
-	// 	query_stack.push(0);
 
-	// 	float mint = MAX_DIST;
-	// 	int mesh_idx = -1;
-
-
-	// 	while (!query_stack.empty()) {
-	// 		int idx = query_stack.pop();
-
-	// 		const GeometryBvhNode& node = meshbvhnodes[idx];
-			
-	// 		if(node.left_idx < 0 ){
-	// 			if(node.left_idx != node.right_idx) {
-	// 			// printf("node idx: %d\n", idx);
-	// 			float t = node.bb.ray_intersect(ro, rd).x;
-	// 			// should I compare it with mint or infinity?
-	// 			if(t < mint)
-	// 			{
-	// 				// printf("bounding box: %f %f %f %f %f %f\n", node.bb.min.x, node.bb.min.y, node.bb.min.z, node.bb.max.x, node.bb.max.y, node.bb.max.z);
-	// 				// printf("t: %f\n", t);
-	// 				mesh_idx = -node.left_idx-1;
-	// 				// const MeshData& mesh = meshes[meshIdx];
-
-	// 				// const TriangleBvhNode* bvhnodes = mesh.sdf.triangle_bvh->nodes_gpu();
-	// 				// const Triangle* triangles = mesh.sdf.triangles_gpu.data();
-
-	// 				// auto result = ray_intersect_triangle(ro, rd, bvhnodes, triangles);
-	// 				// printf("result.second: %f\n", result.second);
-	// 				// // auto result = ray_intersect(ro, rd, mesh.triangle_bvh, mesh.triangles_gpu);
-					
-	// 				// if (result.second < mint) {
-	// 				// shortest_idx = result.first;
-	// 				// 	mint = result.second;
-	// 				// 	mesh_idx = meshIdx;
-	// 				// }	
-	// 				mint = t;
-	// 					// mesh_idx = meshIdx;
-	// 			}
-	// 		}
-	// 		}
-
-    //     	else {
-	// 				DistAndIdx children[BRANCHING_FACTOR];
-
-	// 				uint32_t first_child = node.left_idx;
-	// 				// printf("first_child: %d\n", first_child);
-	// 				NGP_PRAGMA_UNROLL
-	// 				for (uint32_t i = 0; i < BRANCHING_FACTOR; ++i) {
-	// 					// printf("i+first_child: %d\n", i+first_child);
-	// 					children[i] = {meshbvhnodes[i+first_child].bb.ray_intersect(ro, rd).x, i+first_child};
-	// 				}
-
-	// 				sorting_network<BRANCHING_FACTOR>(children);
-
-	// 				// pushes the indices ofchildren with the closest bounding boxes (intersect with the ray) to the query stack
-	// 				NGP_PRAGMA_UNROLL
-	// 				for (uint32_t i = 0; i < BRANCHING_FACTOR; ++i) {
-	// 					if (children[i].dist < mint) {
-	// 						query_stack.push(children[i].idx);
-	// 					}
-	// 				}
-	// 			}
-	// 	}
-
-	// 	return {mesh_idx, mint};
-	// }
-
-	__host__ __device__ static std::pair<int,  float> ray_intersect(const vec3& ro, const vec3& rd, const GeometryBvhNode* __restrict__ meshbvhnodes) {
+	__host__ __device__ static std::tuple<int, float, vec3> ray_intersect(const vec3& ro, const vec3& rd, const GeometryBvhNode* __restrict__ meshbvhnodes) {
 		
 		float mint = MAX_DIST;
+		float maxt = MAX_DIST;
 		int mesh_idx = -1;
-		
+		int index = -1;
 		auto root = meshbvhnodes[0];
 		int start =  root.left_idx -1;
 		int end =  root.right_idx;
-
-		// printf("start: %d\n", start);
-		// printf("end: %d\n", end);
-		// printf("root.left_idx: %d\n", root.left_idx);
-		// printf("root.right_idx: %d\n", root.right_idx);
-		// printf("root.bounds: %f %f %f %f %f %f\n", root.bb.min.x, root.bb.min.y, root.bb.min.z, root.bb.max.x, root.bb.max.y, root.bb.max.z);
-		// printf("root type: %d\n", root.type);
+		vec3 normal = vec3(0.0f);
 
 		for (int idx = start; idx < end; ++idx) {
 			const GeometryBvhNode& node = meshbvhnodes[idx];
 			if(node.left_idx < 0 ) {
 				if(node.left_idx != node.right_idx) {
 
-					float t =  node.bb.ray_intersect(ro, rd).x;
-					if (t < mint && t > - std::numeric_limits<float>::max()) {
-						mint = t;
+					// float t =  node.bb.ray_intersect(ro, rd).x;
+					vec2 t = node.bb.ray_intersect(ro, rd);
+					if (t.x < mint && t.x > - std::numeric_limits<float>::max()) {
+						index = idx;
+						mint = t.x;
 						mesh_idx = -node.left_idx-1;
+						if(t.y < std::numeric_limits<float>::max())
+							maxt = t.y;
+						else
+							maxt = 1.0f;
 					}
 				}
 			}
 		}
 
-		// while (!query_stack.empty()) {
-		// 	int idx = query_stack.pop();
-
-		// 	const GeometryBvhNode& node = meshbvhnodes[idx];
-			
-		// 	if(node.left_idx < 0 ){
-		// 		if(node.left_idx != node.right_idx) {
-		// 		// printf("node idx: %d\n", idx);
-		// 		float t = node.bb.ray_intersect(ro, rd).x;
-		// 		// should I compare it with mint or infinity?
-		// 		if(t < mint)
-		// 		{
-		// 			// printf("bounding box: %f %f %f %f %f %f\n", node.bb.min.x, node.bb.min.y, node.bb.min.z, node.bb.max.x, node.bb.max.y, node.bb.max.z);
-		// 			// printf("t: %f\n", t);
-		// 			mesh_idx = -node.left_idx-1;
-		// 			// const MeshData& mesh = meshes[meshIdx];
-
-		// 			// const TriangleBvhNode* bvhnodes = mesh.sdf.triangle_bvh->nodes_gpu();
-		// 			// const Triangle* triangles = mesh.sdf.triangles_gpu.data();
-
-		// 			// auto result = ray_intersect_triangle(ro, rd, bvhnodes, triangles);
-		// 			// printf("result.second: %f\n", result.second);
-		// 			// // auto result = ray_intersect(ro, rd, mesh.triangle_bvh, mesh.triangles_gpu);
-					
-		// 			// if (result.second < mint) {
-		// 			// shortest_idx = result.first;
-		// 			// 	mint = result.second;
-		// 			// 	mesh_idx = meshIdx;
-		// 			// }	
-		// 			mint = t;
-		// 				// mesh_idx = meshIdx;
-		// 		}
-		// 	}
-		// 	}
-
-        // 	else {
-		// 			DistAndIdx children[BRANCHING_FACTOR];
-
-		// 			uint32_t first_child = node.left_idx;
-		// 			// printf("first_child: %d\n", first_child);
-		// 			NGP_PRAGMA_UNROLL
-		// 			for (uint32_t i = 0; i < BRANCHING_FACTOR; ++i) {
-		// 				// printf("i+first_child: %d\n", i+first_child);
-		// 				children[i] = {meshbvhnodes[i+first_child].bb.ray_intersect(ro, rd).x, i+first_child};
-		// 			}
-
-		// 			sorting_network<BRANCHING_FACTOR>(children);
-
-		// 			// pushes the indices ofchildren with the closest bounding boxes (intersect with the ray) to the query stack
-		// 			NGP_PRAGMA_UNROLL
-		// 			for (uint32_t i = 0; i < BRANCHING_FACTOR; ++i) {
-		// 				if (children[i].dist < mint) {
-		// 					query_stack.push(children[i].idx);
-		// 				}
-		// 			}
-		// 		}
-		// }
-
-		return {mesh_idx, mint};
+		auto p = ro + maxt * rd;
+		normal = meshbvhnodes[index].bb.normal(p);
+		return {mesh_idx, maxt, normal};
 	}
-	
-
-	// __host__ __device__ static std::pair<int,  float> ray_intersect(const vec3& ro, const vec3& rd, const GeometryBvhNode* __restrict__ meshbvhnodes, const MeshData* __restrict__ meshes) {
-
-	// 	float mint = MAX_DIST;
-	// 	int mesh_idx = -1;
-
-
-	// 	for (int idx = 0; idx < 5; ++idx) {
-	// 		const GeometryBvhNode& node = meshbvhnodes[idx];
-	// 		if(node.left_idx != node.right_idx) {
-	// 			if(node.left_idx < 0 ){
-	// 				float t = node.bb.ray_intersect(ro, rd).x;
-	// 				if(t < mint && t > - std::numeric_limits<float>::max())
-	// 				{
-	// 					mesh_idx = -node.left_idx-1;
-	// 					mint = t;
-	// 					// int meshIdx = -node.left_idx-1;
-	// 					// const MeshData& mesh = meshes[mesh_idx];
-	// 					// printf("meshIdx: %d\n", meshIdx);
-	// 					// TriangleBvhNode* bvhnodes = mesh.sdf.triangle_bvh->nodes_gpu();
-	// 					// Triangle* triangles = mesh.sdf.triangles_gpu.data();
-						
-	// 					// auto result = ray_intersect_triangle(ro, rd, bvhnodes, triangles);
-	// 					// printf("result.second: %f\n", result.second);
-	// 					// if (result.second < mint) {
-	// 					// 	shortest_idx = result.first;
-	// 					// 	mint = result.second;
-	// 					// 	// mesh_idx = meshIdx;
-	// 					// }   
-	// 				}
-	// 		}
-	// 	}
-	// 	}
-
-	// 	 return {mesh_idx, mint};
-	// }
 
 	__host__ __device__ static std::pair<int, float> ray_intersect(const vec3& ro, const vec3& rd, const GeometryBvhNode* __restrict__ nerfbvhnodes, const Nerf* __restrict__ nerfs) {
 		FixedIntStack query_stack;
@@ -543,14 +383,6 @@ public:
 		return avg_normal_around_point(point, m_nodes.data(), triangles);
 	}
 
-	// float signed_distance(EMeshSdfMode mode, const vec3& point, const std::vector<Triangle>& triangles) const {
-	// 	if (mode == EMeshSdfMode::Watertight) {
-	// 		return signed_distance_watertight(point, m_nodes.data(), triangles.data(), MAX_DIST*MAX_DIST);
-	// 	} else {
-	// 		return signed_distance_raystab(point, m_nodes.data(), triangles.data(), MAX_DIST*MAX_DIST);
-	// 	}
-	// }
-
 	void signed_distance_gpu_mesh(uint32_t n_elements, EMeshSdfMode mode, const vec3* gpu_positions, float* gpu_distances, const MeshData* __restrict__ meshes, bool use_existing_distances_as_upper_bounds, cudaStream_t stream) override {
 		
 		const auto mesh = meshes[0];
@@ -594,22 +426,12 @@ public:
 			meshes	
 		);
 
-		// it will be executed in sequence! maybe I can change it in the future
-		linear_kernel(nerf_raytrace_kernel, 0, stream,
-			n_elements,
-			gpu_positions,
-			gpu_directions,
-			m_nodes_gpu.data(),
-			nerfs	
-		);
-
 		int hit_counter_host = 0;
 		cudaMemcpyFromSymbol(&hit_counter_host, hit_counter, sizeof(int));
 		printf("Number of rays that hit a mesh: %d\n", hit_counter_host);
 	}
 
 	void ray_trace_mesh_gpu(uint32_t n_elements, vec3* gpu_positions, vec3* gpu_directions, const MeshData* __restrict__ meshes, cudaStream_t stream) override {
-		// tlog::info() << "ray_trace_mesh_gpu";
 		linear_kernel(mesh_raytrace_kernel, 0, stream,
 			n_elements,
 			gpu_positions,
@@ -618,22 +440,7 @@ public:
 			m_bvhnodes_gpu.data(),
 			m_triangles_gpu.data(),
 			meshes	
-		);
-		
-		int hit_counter_host = 0;
-		cudaMemcpyFromSymbol(&hit_counter_host, hit_counter, sizeof(int));
-		// printf("Number of rays that hit a mesh: %d\n", hit_counter_host);	
-	}
-
-	void ray_trace_nerf_gpu(uint32_t n_elements, vec3* gpu_positions, vec3* gpu_directions, const Nerf* __restrict__ nerfs, cudaStream_t stream) override {
-		linear_kernel(nerf_raytrace_kernel, 0, stream,
-			n_elements,
-			gpu_positions,
-			gpu_directions,
-			m_nodes_gpu.data(),
-			nerfs	
-		);
-			
+		);	
 	}
 
 	void build_mesh(std::vector<MeshData>& meshes, uint32_t n_primitives_per_leaf) override {
@@ -712,10 +519,7 @@ public:
 				m_nodes.back().bb = BoundingBox(&*child.begin, &*child.end);
 
 				if (std::distance(child.begin, child.end) <= n_primitives_per_leaf) {
-					// I am not sure but I think this should be chnaged to this!
-					// int idx = -(int)std::distance(std::begin(meshes), child.begin)-1;
-					// m_nodes.back().left_idx = idx;
-					// m_nodes.back().right_idx = idx;
+
 					m_nodes.back().left_idx = -(int)std::distance(std::begin(meshes), child.begin)-1;
 					m_nodes.back().right_idx = -(int)std::distance(std::begin(meshes), child.end)-1;
 				} else {
@@ -838,72 +642,36 @@ std::unique_ptr<GeometryBvh> GeometryBvh::make() {
 	return std::unique_ptr<GeometryBvh>(new GeometryBvh4());
 }
 
-// __global__ void mesh_raytrace_kernel(uint32_t n_elements, vec3* __restrict__ positions, vec3* __restrict__ directions, const GeometryBvhNode* __restrict__ nodes, const MeshData* __restrict__ meshes) {		
-// 	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;	//index i of the current thread.
-// 	if (i >= n_elements) return;
-
-// 	auto pos = positions[i];
-// 	auto dir = directions[i];
-	
-// 	auto p = GeometryBvh4::ray_intersect(pos, dir, nodes);
-// 	// first element is the index of the intersected mesh
-// 	// third element is the distance to the intersection to the bounding box of the mesh
-
-// 	// positions[i] = pos + p.second * dir;
-
-
-//     // if a mesh was hit, p.first is its triangle index and it updates the direction of the ray to the normal of the intersected traingle, 
-//     // otherwise p.first is -1.
-
-// 	if (p.first > -1) {
-// 		// printf("updating directions \n")  ;
-// 		// printf("p.first: %d\n", p.first);
-// 		auto& mesh = meshes[p.first];
-// 		// directions[i] = mesh.sdf.triangles_gpu[static_cast<size_t>(p.first)].normal();
-		
-// 		// auto dir = directions[i];
-		
-// 		// const TriangleBvhNode* bvhnodes = mesh.sdf.triangle_bvh->nodes_gpu();
-// 		// 	// const Triangle* triangles = mesh.sdf.triangles_gpu.data();
-// 		auto result = GeometryBvh4::ray_intersect_triangle(pos, dir, &mesh);
-		
-// 		// positions[i] = pos + p.second * dir;
-// 		positions[i] = pos + result.second * dir;
-		
-// 		if(result.first) {
-// 			atomicAdd(&hit_counter, 1);
-// 			directions[i] = mesh.sdf.triangles_gpu[static_cast<size_t>(result.first)].normal();
-// 		}
-// 	}
-// 	// else {
-// 	// 	positions[i] = pos + p.second * dir;
-// 	// }
-// }
-
+// each thread processes one ray.
 __global__ void mesh_raytrace_kernel(uint32_t n_elements, vec3* __restrict__ positions, vec3* __restrict__ directions, const GeometryBvhNode* __restrict__ nodes, const TriangleBvhNode** __restrict__ bvhnodes, const Triangle** __restrict__ triangles, const MeshData* __restrict__ meshes) {		
 	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+	// no more rays to process
 	if (i >= n_elements) return;
 
 	auto pos = positions[i];
 	auto dir = directions[i];
 	
 	// first element is the index of the intersected mesh
-	// third element is the distance to the intersection to the bounding box of the mesh
+	// second element is the distance to the intersection to the bounding box of the mesh
 	auto p = GeometryBvh4::ray_intersect(pos, dir, nodes);
 
-	if (p.first > -1) {
+	if (std::get<0>(p) > -1) {
 	
-		const TriangleBvhNode* mesh_bvhnodes = bvhnodes[p.first];
-        const Triangle* mesh_triangles = triangles[p.first];
+		const TriangleBvhNode* mesh_bvhnodes = bvhnodes[std::get<0>(p)];
+        const Triangle* mesh_triangles = triangles[std::get<0>(p)];
 		
 		auto result = GeometryBvh4::ray_intersect_triangle(pos, dir, mesh_bvhnodes, mesh_triangles);
 		
-		positions[i] = pos + result.second * dir;
 		
+		positions[i] = pos + result.second * dir;
 		if(result.first > -1) {
-			atomicAdd(&hit_counter, 1);
 			directions[i] = mesh_triangles[result.first].normal();
 		}
+
+		// else {
+		// 	// positions[i] = pos + std::get<1>(p) * dir;
+		// 	directions[i] = dir;
+		// }
 	}
 }
 
@@ -951,23 +719,6 @@ __global__ void unsigned_distance_kernel_geometry(uint32_t n_elements,
 
 	float max_distance = use_existing_distances_as_upper_bounds ? distances[i] : MAX_DIST;
 	distances[i] = GeometryBvh4::unsigned_distance(positions[i], bvhnodes, triangles, max_distance*max_distance);
-}
-
-
-__global__ void nerf_raytrace_kernel(uint32_t n_elements, vec3* __restrict__ positions, vec3* __restrict__ directions, const GeometryBvhNode* __restrict__ nodes, const Nerf* __restrict__ nerfs) {		
-	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;	//index i of the current thread.
-	if (i >= n_elements) return;
-
-	auto pos = positions[i];
-	auto dir = directions[i];
-
-	auto p = GeometryBvh4::ray_intersect(pos, dir, nodes, nerfs);
-	// first element is the index of the intersected geometry and the second element is the distance to the intersection.
-	
-	// new positions = intersection points
-	positions[i] = pos + p.second * dir;
-
-	// not sure if the direction sho9uld be updated or not
 }
 
 }

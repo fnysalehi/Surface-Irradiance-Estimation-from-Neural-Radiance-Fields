@@ -1,5 +1,4 @@
 # Hybrid NeRF-Mesh Rendering Framework
-
 This repository contains an implementation of a **hybrid rendering framework** that integrates **Neural Radiance Fields (NeRF)** with **traditional polygonal mesh models**, enabling seamless and realistic scene rendering with a combination of volumetric and geometric representations. The project also incorporates **advanced shading techniques**, ensuring visually consistent lighting and materials across different data representations.
 
 ## **Project Overview**
